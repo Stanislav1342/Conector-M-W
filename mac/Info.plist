@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleExecutable</key>
+	<string>Prilo</string>
+	<key>CFBundleIconFile</key>
+	<string>Prilo.icns</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.artlee12.prilo</string>
+	<key>CFBundleName</key>
+	<string>Prilo</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.8.2</string>
+	<key>CFBundleVersion</key>
+	<string>10</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_prilo._tcp</string>
+	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Prilo connects to your Windows PC on the local network.</string>
+	<key>PriloUpdateRepository</key>
+	<string>artlee12/prilo</string>
+</dict>
+</plist>

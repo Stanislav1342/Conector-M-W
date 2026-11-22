@@ -1,0 +1,16 @@
+{
+  "name": "homebridge-prilo",
+  "version": "0.7.0",
+  "description": "Wake and shut down a Windows PC paired with Prilo",
+  "keywords": ["homebridge-plugin", "wake-on-lan"],
+  "main": "index.js",
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20",
+    "homebridge": "^1.8.0 || ^2.0.0"
+  },
+  "files": ["index.js", "transport.js", "config.schema.json", "README.md"],
+  "private": true
+}
