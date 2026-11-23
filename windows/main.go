@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -10,6 +11,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"log"
 	"math/big"
 	"net"
@@ -28,6 +30,7 @@ type event struct {
 }
 
 type receiver struct {
+	stopped    bool
 	mu         sync.Mutex
 	last       time.Time
 	bottomPush int32
@@ -52,6 +55,9 @@ func (r *receiver) release() {
 func (r *receiver) apply(events []event) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.stopped {
+		return false, http.ErrServerClosed
+	}
 	r.last = time.Now()
 	for _, e := range events {
 		if e.Kind == "release" {
@@ -164,6 +170,63 @@ func main() {
 	}
 	setDPIAware()
 	cleanupOldExe()
+	service, err := startReceiver(func(err error) {
+		fatal("Приёмник Prilo остановился", err)
+	})
+	if err != nil {
+		fatal("Не удалось запустить Prilo Receiver", err)
+	}
+	defer service.close()
+	runTray(&trayApp{
+		invite:  service.invite,
+		details: service.details,
+		quit:    service.close,
+	})
+}
+
+type receiverService struct {
+	listener      net.Listener
+	server        *http.Server
+	input         *receiver
+	invite        *pairingInvite
+	details       func() string
+	cancel        context.CancelFunc
+	done          <-chan struct{}
+	discoveryDone <-chan struct{}
+	stop          sync.Once
+}
+
+func (s *receiverService) close() {
+	s.stop.Do(func() {
+		s.input.mu.Lock()
+		s.input.stopped = true
+		s.input.release()
+		s.input.mu.Unlock()
+		s.cancel()
+		_ = s.server.Close()
+		_ = s.listener.Close()
+		<-s.discoveryDone
+		for attempt := 0; attempt < 3; attempt++ {
+			s.input.mu.Lock()
+			pending := len(s.input.keys) + len(s.input.buttons)
+			if pending == 0 {
+				s.input.mu.Unlock()
+				break
+			}
+			s.input.release()
+			s.input.mu.Unlock()
+			time.Sleep(50 * time.Millisecond)
+		}
+		s.input.mu.Lock()
+		if len(s.input.keys)+len(s.input.buttons) != 0 {
+			log.Print("Windows did not accept all input releases during shutdown")
+		}
+		s.input.mu.Unlock()
+		log.Print("Prilo receiver stopped")
+	})
+}
+
+func startReceiver(onServerError func(error)) (*receiverService, error) {
 	listener, err := net.Listen("tcp4", ":43821")
 	// After a self-update the previous copy may still be closing its listener.
 	for wait := 0; err != nil && launchedAfterUpdate && wait < 40; wait++ {
@@ -171,15 +234,17 @@ func main() {
 		listener, err = net.Listen("tcp4", ":43821")
 	}
 	if err != nil {
-		fatal("Порт 43821 занят. Возможно, Prilo Receiver уже запущен: проверь значок в трее", err)
+		return nil, fmt.Errorf("TCP 43821: %w", err)
 	}
 	saved, err := loadPairing()
 	if err != nil {
-		fatal("Не удалось загрузить ключи Prilo", err)
+		_ = listener.Close()
+		return nil, fmt.Errorf("load Prilo keys: %w", err)
 	}
 	cert, fingerprint, err := saved.credentials()
 	if err != nil {
-		fatal("Сохранённые ключи Prilo повреждены", err)
+		_ = listener.Close()
+		return nil, fmt.Errorf("read Prilo keys: %w", err)
 	}
 	token := saved.Token
 	log.Printf("Prilo receiver %s started (autostart=%v, updated=%v)", version, launchedAtLogin, launchedAfterUpdate)
@@ -188,7 +253,12 @@ func main() {
 	if name == "" {
 		name = "Windows"
 	}
-	go keepAdvertising(name, fingerprint)
+	ctx, cancel := context.WithCancel(context.Background())
+	discoveryDone := make(chan struct{})
+	go func() {
+		defer close(discoveryDone)
+		keepAdvertising(ctx, name, fingerprint)
+	}()
 	invite := &pairingInvite{fingerprint: fingerprint}
 	if _, err := invite.issue(); err != nil {
 		log.Printf("Pairing code: %v", err)
@@ -198,7 +268,12 @@ func main() {
 	go func() {
 		ticker := time.NewTicker(250 * time.Millisecond)
 		defer ticker.Stop()
-		for range ticker.C {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
 			r.mu.Lock()
 			if time.Since(r.last) > 2*time.Second {
 				r.release()
@@ -209,7 +284,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	var control sync.Mutex
-	mux.HandleFunc("/stream", inputStream(r, &control, token))
+	mux.HandleFunc("/stream", inputStreamContext(ctx, r, &control, token))
 	mux.HandleFunc("/device", deviceInfo(token))
 	invite.register(mux, token)
 	power := &powerController{shutdown: shutdownWindows}
@@ -252,18 +327,16 @@ func main() {
 		Handler: mux, TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
 		ReadTimeout: 3 * time.Second, WriteTimeout: 3 * time.Second, IdleTimeout: 15 * time.Second,
 	}
+	service := &receiverService{listener: listener, server: server, input: r, invite: invite, cancel: cancel, done: ctx.Done(), discoveryDone: discoveryDone,
+		details: func() string { return connectionDetails(token, fingerprint) }}
 	go func() {
 		if err := server.ServeTLS(listener, "", ""); !errors.Is(err, http.ErrServerClosed) {
-			fatal("Приёмник Prilo остановился", err)
+			log.Printf("Prilo receiver stopped unexpectedly: %v", err)
+			service.close()
+			if onServerError != nil {
+				onServerError(err)
+			}
 		}
 	}()
-	runTray(&trayApp{
-		invite:  invite,
-		details: func() string { return connectionDetails(token, fingerprint) },
-		quit: func() {
-			r.releaseAll()
-			_ = server.Close()
-			log.Print("Prilo receiver stopped by user")
-		},
-	})
+	return service, nil
 }

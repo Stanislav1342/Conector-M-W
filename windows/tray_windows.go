@@ -113,7 +113,7 @@ func runTray(app *trayApp) {
 				case <-fresh.ClickedCh:
 					go showInfo(app.pairingText(true))
 				case <-details.ClickedCh:
-					go showInfo(app.details())
+					go showInfo(app.details() + "\nCtrl+C копирует текст этого окна.")
 				case <-startup.ClickedCh:
 					enable := !startup.Checked()
 					if err := setAutostart(enable); err != nil {

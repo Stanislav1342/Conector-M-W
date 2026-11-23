@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -185,4 +186,24 @@ func TestStreamDisconnectReleasesKeys(t *testing.T) {
 		}
 		return false
 	})
+}
+
+func TestStoppingHostedStreamClosesSocketAndReleasesInput(t *testing.T) {
+	resetFake(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h := &streamHarness{t: t, r: newReceiver(), control: &sync.Mutex{}}
+	h.server = httptest.NewServer(inputStreamContext(ctx, h.r, h.control, testToken))
+	defer h.server.Close()
+	ws := h.connect()
+	h.send(ws, inputFrame{Capture: 1, Events: []event{{Kind: "enter"}, {Kind: "key", Code: 30, Down: true}}})
+	if got := h.read(ws); got.Type != "entered" || !h.held(30) {
+		t.Fatalf("expected captured key, got %+v", got)
+	}
+	cancel()
+	_ = ws.SetReadDeadline(time.Now().Add(time.Second))
+	if _, _, err := ws.ReadMessage(); err == nil {
+		t.Fatal("hosted stream did not close")
+	}
+	waitFor(t, "released key", func() bool { return !h.held(30) })
 }

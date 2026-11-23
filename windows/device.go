@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/json"
@@ -109,7 +110,7 @@ func connectionDetails(token, fingerprint string) string {
 	for _, adapter := range wakeAdapters() {
 		fmt.Fprintf(&b, "\nWake-on-LAN: %s\nMAC %s · Broadcast %s\n", adapter.Name, adapter.MAC, adapter.Broadcast)
 	}
-	b.WriteString("\nНе показывай код доступа другим людям. Ctrl+C копирует текст этого окна.")
+	b.WriteString("\nХрани код доступа в секрете.")
 	return b.String()
 }
 
@@ -143,8 +144,13 @@ func advertise(name, fingerprint string) (*zeroconf.Server, error) {
 		[]string{"v=1", "fingerprint=" + fingerprint, "name=" + name}, nil)
 }
 
-func keepAdvertising(name, fingerprint string) {
+func keepAdvertising(ctx context.Context, name, fingerprint string) {
 	var current *zeroconf.Server
+	defer func() {
+		if current != nil {
+			current.Shutdown()
+		}
+	}()
 	var previous string
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -173,7 +179,11 @@ func keepAdvertising(name, fingerprint string) {
 			}
 			previous = signature
 		}
-		<-ticker.C
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
 	}
 }
 

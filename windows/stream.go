@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -39,6 +40,10 @@ func (r *receiver) releaseAll() {
 }
 
 func inputStream(r *receiver, control *sync.Mutex, token string) http.HandlerFunc {
+	return inputStreamContext(context.Background(), r, control, token)
+}
+
+func inputStreamContext(ctx context.Context, r *receiver, control *sync.Mutex, token string) http.HandlerFunc {
 	upgrader := websocket.Upgrader{HandshakeTimeout: 3 * time.Second}
 	return func(w http.ResponseWriter, req *http.Request) {
 		if !authorized(req, token) {
@@ -55,6 +60,8 @@ func inputStream(r *receiver, control *sync.Mutex, token string) http.HandlerFun
 			return
 		}
 		defer ws.Close()
+		stopClosing := context.AfterFunc(ctx, func() { _ = ws.Close() })
+		defer stopClosing()
 		defer r.releaseAll()
 		ws.SetReadLimit(32768)
 		write := func(message streamMessage) error {

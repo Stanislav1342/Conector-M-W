@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"runtime"
 	"syscall"
 	"unsafe"
 )
@@ -11,12 +12,29 @@ var sendInput = user32.NewProc("SendInput")
 var getCursorPos = user32.NewProc("GetCursorPos")
 var setCursorPos = user32.NewProc("SetCursorPos")
 var getSystemMetrics = user32.NewProc("GetSystemMetrics")
+var setThreadDPI = user32.NewProc("SetThreadDpiAwarenessContext")
 
 func setDPIAware() {
 	user32.NewProc("SetProcessDPIAware").Call()
 }
 
+// Cursor coordinates must agree even when hosted by a DPI-unaware Python process.
+func cursorDPI() func() {
+	if setThreadDPI.Find() != nil {
+		return func() {}
+	}
+	runtime.LockOSThread()
+	previous, _, _ := setThreadDPI.Call(^uintptr(3)) // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4.
+	return func() {
+		if previous != 0 {
+			setThreadDPI.Call(previous)
+		}
+		runtime.UnlockOSThread()
+	}
+}
+
 func atBottom() bool {
+	defer cursorDPI()()
 	var point [2]int32
 	ok, _, _ := getCursorPos.Call(uintptr(unsafe.Pointer(&point)))
 	height, _, _ := getSystemMetrics.Call(1)
@@ -61,12 +79,14 @@ func (e event) send() error {
 	i := input{}
 	switch e.Kind {
 	case "enter":
+		defer cursorDPI()()
 		width, _, _ := getSystemMetrics.Call(0)
 		height, _, _ := getSystemMetrics.Call(1)
 		x := int32(int64(e.X) * int64(width-1) / 65535)
 		y := max(0, int32(height)-20)
 		return moveCursor(x, y)
 	case "move":
+		defer cursorDPI()()
 		var point [2]int32
 		if ok, _, err := getCursorPos.Call(uintptr(unsafe.Pointer(&point))); ok == 0 {
 			return fmt.Errorf("GetCursorPos failed: %v", err)
