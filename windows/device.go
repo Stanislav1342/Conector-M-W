@@ -99,7 +99,7 @@ type wakeAdapter struct {
 // connectionDetails is the text for manual setup on the Mac. It contains the access code.
 func connectionDetails(token, fingerprint string) string {
 	var b strings.Builder
-	b.WriteString("Данные для ручного подключения в Prilo на Mac.\n\n")
+	b.WriteString("Данные для ручного подключения в Conector-M-W на Mac.\n\n")
 	addresses, _ := net.InterfaceAddrs()
 	for _, address := range addresses {
 		if ip, ok := address.(*net.IPNet); ok && ip.IP.To4() != nil && !ip.IP.IsLoopback() && !ip.IP.IsLinkLocalUnicast() {
@@ -140,7 +140,7 @@ func wakeAdapters() []wakeAdapter {
 func advertise(name, fingerprint string) (*zeroconf.Server, error) {
 	// Use the identity suffix to keep equally named Windows installations distinct.
 	instance := name + "-" + fingerprint[:6]
-	return zeroconf.Register(instance, "_prilo._tcp", "local.", 43821,
+	return zeroconf.Register(instance, "_conector-mw._tcp", "local.", 43821,
 		[]string{"v=1", "fingerprint=" + fingerprint, "name=" + name}, nil)
 }
 
@@ -174,7 +174,7 @@ func keepAdvertising(ctx context.Context, name, fingerprint string) {
 					}
 				} else {
 					current = next
-					log.Print("Prilo discovery ready")
+					log.Print("Conector-M-W discovery ready")
 				}
 			}
 			previous = signature

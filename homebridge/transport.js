@@ -12,18 +12,18 @@ const offlineCodes = new Set(['EHOSTUNREACH', 'EHOSTDOWN', 'ENETUNREACH', 'ECONN
 
 function parse(config) {
   if (!isIPv4(config.host) || !isIPv4(config.broadcast)) {
-    throw new Error('Prilo PC requires IPv4 addresses for host and broadcast');
+    throw new Error('Conector-M-W PC requires IPv4 addresses for host and broadcast');
   }
   if (!/^[a-f0-9]{64}$/i.test(config.fingerprint ?? '') || !/^[a-f0-9]{64}$/i.test(config.powerToken ?? '')) {
-    throw new Error('Prilo PC requires the fingerprint and scoped power token exported by Prilo');
+    throw new Error('Conector-M-W PC requires the fingerprint and scoped power token exported by Conector-M-W');
   }
   const address = (config.mac ?? '').replace(/[:-]/g, '');
   if (!/^[a-f0-9]{12}$/i.test(address)) {
-    throw new Error('Prilo PC requires a six-byte MAC address');
+    throw new Error('Conector-M-W PC requires a six-byte MAC address');
   }
   const mac = Buffer.from(address, 'hex');
   if ((mac[0] & 1) || mac.every(byte => byte === 0)) {
-    throw new Error('Prilo PC requires a unicast MAC address');
+    throw new Error('Conector-M-W PC requires a unicast MAC address');
   }
   return {
     host: config.host,
@@ -40,7 +40,7 @@ function pinnedAgent(connection) {
   agent.createConnection = (_options, callback) => {
     const socket = tls.connect({ host: connection.host, port, rejectUnauthorized: false, minVersion: 'TLSv1.2' });
     const deadline = setTimeout(() => {
-      const error = Object.assign(new Error('Prilo TLS connection timed out'), { code: 'ETIMEDOUT' });
+      const error = Object.assign(new Error('Conector-M-W TLS connection timed out'), { code: 'ETIMEDOUT' });
       socket.destroy(error);
     }, timeout);
     const failed = error => {
@@ -52,7 +52,7 @@ function pinnedAgent(connection) {
       const cert = socket.getPeerCertificate();
       const digest = cert.raw && createHash('sha256').update(cert.raw).digest();
       if (!digest || !timingSafeEqual(digest, connection.fingerprint)) {
-        const error = Object.assign(new Error('Prilo PC certificate does not match'), { code: 'PRILO_PIN' });
+        const error = Object.assign(new Error('Conector-M-W PC certificate does not match'), { code: 'CONECTOR_PIN' });
         socket.destroy(error);
         return;
       }
@@ -85,7 +85,7 @@ function request(connection, shutdown) {
       res.once('error', complete);
     });
     req.setTimeout(timeout, () => {
-      req.destroy(Object.assign(new Error('Prilo HTTP request timed out'), { code: 'ETIMEDOUT' }));
+      req.destroy(Object.assign(new Error('Conector-M-W HTTP request timed out'), { code: 'ETIMEDOUT' }));
     });
     req.once('error', complete);
     req.end();

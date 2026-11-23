@@ -138,7 +138,7 @@ func TestCredentialsFingerprint(t *testing.T) {
 
 // The Mac app (PowerAccess.code) and the Homebridge export rely on this exact derivation.
 func TestPowerTokenDerivation(t *testing.T) {
-	const want = "f8bcdd75a07ae2b7135b348261a0321d6b6aba4fc8b067b54928507d65f317b8"
+	const want = "db216d5682cfc00e69ff8b315d9b9b0e0b2420229c76815817f384b8273ff20e"
 	if got := powerToken(testToken); got != want {
 		t.Fatalf("powerToken = %s, want %s", got, want)
 	}

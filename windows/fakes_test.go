@@ -9,11 +9,14 @@ import (
 )
 
 var fake struct {
-	mu      sync.Mutex
-	sent    []event
-	failKey uint16 // key-up for this code fails while non-zero
-	err     error  // every send fails while non-nil
-	bottom  bool
+	mu          sync.Mutex
+	sent        []event
+	failKey     uint16 // key-up for this code fails while non-zero
+	err         error  // every send fails while non-nil
+	bottom      bool
+	clipSeq     uint32
+	clipText    string
+	clipHasText bool
 }
 
 func (e event) send() error {
@@ -58,10 +61,35 @@ func (e fakeError) Error() string { return string(e) }
 
 const errFake = fakeError("injected send failure")
 
+func getClipboardSequenceNumber() uint32 {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	return fake.clipSeq
+}
+
+func getClipboardText() (string, bool, error) {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if !fake.clipHasText {
+		return "", false, nil
+	}
+	return fake.clipText, true, nil
+}
+
+func setClipboardText(text string) error {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	fake.clipSeq++
+	fake.clipText = text
+	fake.clipHasText = true
+	return nil
+}
+
 func resetFake(t *testing.T) {
 	t.Helper()
 	fake.mu.Lock()
 	fake.sent, fake.failKey, fake.err, fake.bottom = nil, 0, nil, false
+	fake.clipSeq, fake.clipText, fake.clipHasText = 0, "", false
 	fake.mu.Unlock()
 }
 
@@ -75,4 +103,18 @@ func setBottom(value bool) {
 	fake.mu.Lock()
 	fake.bottom = value
 	fake.mu.Unlock()
+}
+
+func setFakeClipboard(text string) {
+	fake.mu.Lock()
+	fake.clipSeq++
+	fake.clipText = text
+	fake.clipHasText = true
+	fake.mu.Unlock()
+}
+
+func fakeClipboard() string {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	return fake.clipText
 }

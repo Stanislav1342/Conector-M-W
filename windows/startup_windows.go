@@ -37,7 +37,7 @@ func autostartEnabled() bool {
 	if err != nil {
 		return false
 	}
-	return hiddenCommand(reg, "query", runKey, "/v", "PriloReceiver").Run() == nil
+	return hiddenCommand(reg, "query", runKey, "/v", "ConectorMWReceiver").Run() == nil
 }
 
 // setAutostart adds or removes this executable from the account's Run key.
@@ -46,13 +46,13 @@ func setAutostart(enable bool) error {
 	if err != nil {
 		return err
 	}
-	args := []string{"delete", runKey, "/v", "PriloReceiver", "/f"}
+	args := []string{"delete", runKey, "/v", "ConectorMWReceiver", "/f"}
 	if enable {
 		path, err := os.Executable()
 		if err != nil {
 			return err
 		}
-		args = []string{"add", runKey, "/v", "PriloReceiver", "/t", "REG_SZ", "/d", `"` + path + `" --autostart`, "/f"}
+		args = []string{"add", runKey, "/v", "ConectorMWReceiver", "/t", "REG_SZ", "/d", `"` + path + `" --autostart`, "/f"}
 	} else if !autostartEnabled() {
 		return nil
 	}
@@ -134,7 +134,7 @@ func allowFirewall() error {
 	netsh := filepath.Join(root, "System32", "netsh.exe")
 	cmd := filepath.Join(root, "System32", "cmd.exe")
 	// cmd strips the outer quotes after /c; both netsh calls run in one elevated window.
-	script := fmt.Sprintf(`/c ""%[1]s" advfirewall firewall delete rule name="Prilo Receiver" >nul 2>&1 & "%[1]s" advfirewall firewall add rule name="Prilo Receiver" dir=in action=allow enable=yes profile=private,domain protocol=TCP localport=43821 program="%[2]s""`, netsh, path)
+	script := fmt.Sprintf(`/c ""%[1]s" advfirewall firewall delete rule name="Conector-M-W Receiver" >nul 2>&1 & "%[1]s" advfirewall firewall add rule name="Conector-M-W Receiver" dir=in action=allow enable=yes profile=private,domain protocol=TCP localport=43821 program="%[2]s""`, netsh, path)
 	code, err := runElevated(cmd, script)
 	if err != nil {
 		return err
@@ -162,9 +162,9 @@ func startupOption() (bool, error) {
 			return true, err
 		}
 		if enable {
-			showInfo("Prilo Receiver будет запускаться в фоне после входа в этот аккаунт Windows. Значок появится в трее.")
+			showInfo("Conector-M-W Receiver будет запускаться в фоне после входа в этот аккаунт Windows. Значок появится в трее.")
 		} else {
-			showInfo("Автозапуск Prilo Receiver выключен.")
+			showInfo("Автозапуск Conector-M-W Receiver выключен.")
 		}
 		return true, nil
 	default:

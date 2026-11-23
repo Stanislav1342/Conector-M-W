@@ -9,13 +9,13 @@ import (
 
 const logLimit = 256 << 10
 
-// logPath is %LOCALAPPDATA%\Prilo\receiver.log on Windows.
+// logPath is %LOCALAPPDATA%\Conector-M-W\receiver.log on Windows.
 func logPath() string {
 	dir, err := os.UserCacheDir()
 	if err != nil {
 		dir = os.TempDir()
 	}
-	return filepath.Join(dir, "Prilo", "receiver.log")
+	return filepath.Join(dir, "Conector-M-W", "receiver.log")
 }
 
 // setupLog sends the standard logger to the log file, keeping one previous file.

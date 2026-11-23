@@ -1,5 +1,5 @@
 {
-  "pluginAlias": "PriloPC",
+  "pluginAlias": "ConectorPC",
   "pluginType": "accessory",
   "singular": false,
   "schema": {
@@ -7,11 +7,11 @@
     "required": ["name", "host", "mac", "broadcast", "powerToken", "fingerprint"],
     "properties": {
       "name": {"title": "Имя ПК", "type": "string"},
-      "uuid_base": {"title": "Идентификатор профиля из Prilo", "type": "string"},
+      "uuid_base": {"title": "Идентификатор профиля из Conector-M-W", "type": "string"},
       "host": {"title": "IPv4 Windows", "type": "string"},
       "mac": {"title": "MAC для Wake-on-LAN", "type": "string"},
       "broadcast": {"title": "Broadcast", "type": "string"},
-      "powerToken": {"title": "Код питания Prilo", "type": "string"},
+      "powerToken": {"title": "Код питания Conector-M-W", "type": "string"},
       "fingerprint": {"title": "Отпечаток сертификата", "type": "string"}
     }
   }

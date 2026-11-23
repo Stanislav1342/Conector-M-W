@@ -12,13 +12,16 @@ import (
 )
 
 type inputFrame struct {
-	Capture uint64
-	Events  []event
+	Type      string `json:"type,omitempty"`
+	Capture   uint64
+	Events    []event
+	Clipboard string `json:"clipboard,omitempty"`
 }
 
 type streamMessage struct {
 	Type    string `json:"type"`
 	Capture uint64 `json:"capture,omitempty"`
+	Text    string `json:"text,omitempty"`
 }
 
 func validEvents(events []event) bool {
@@ -60,17 +63,40 @@ func inputStreamContext(ctx context.Context, r *receiver, control *sync.Mutex, t
 			return
 		}
 		defer ws.Close()
-		stopClosing := context.AfterFunc(ctx, func() { _ = ws.Close() })
+		streamCtx, stopStream := context.WithCancel(ctx)
+		defer stopStream()
+		stopClosing := context.AfterFunc(streamCtx, func() { _ = ws.Close() })
 		defer stopClosing()
 		defer r.releaseAll()
-		ws.SetReadLimit(32768)
+		ws.SetReadLimit(2 << 20)
+		var writeMu sync.Mutex
 		write := func(message streamMessage) error {
+			writeMu.Lock()
+			defer writeMu.Unlock()
 			_ = ws.SetWriteDeadline(time.Now().Add(time.Second))
 			return ws.WriteJSON(message)
 		}
 		if write(streamMessage{Type: "ready"}) != nil {
 			return
 		}
+		clip := newClipboardBridge()
+		pushClipboard := func() {
+			if text, ok := clip.pollLocal(); ok {
+				_ = write(streamMessage{Type: "clipboard", Text: text})
+			}
+		}
+		go func() {
+			ticker := time.NewTicker(250 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-streamCtx.Done():
+					return
+				case <-ticker.C:
+					pushClipboard()
+				}
+			}
+		}()
 		var capture uint64
 		for {
 			readTimeout := 12 * time.Second
@@ -84,7 +110,19 @@ func inputStreamContext(ctx context.Context, r *receiver, control *sync.Mutex, t
 			}
 			var frame inputFrame
 			if (kind != websocket.TextMessage && kind != websocket.BinaryMessage) ||
-				json.Unmarshal(data, &frame) != nil || !validEvents(frame.Events) {
+				json.Unmarshal(data, &frame) != nil {
+				_ = write(streamMessage{Type: "invalid"})
+				return
+			}
+			if frame.Type == "clipboard" {
+				if len(frame.Clipboard) <= maxClipboardBytes {
+					if err := clip.applyRemote(frame.Clipboard); err != nil {
+						log.Printf("clipboard apply: %v", err)
+					}
+				}
+				continue
+			}
+			if !validEvents(frame.Events) {
 				_ = write(streamMessage{Type: "invalid"})
 				return
 			}
@@ -110,6 +148,7 @@ func inputStreamContext(ctx context.Context, r *receiver, control *sync.Mutex, t
 				return
 			}
 			if returned || first == "release" {
+				pushClipboard()
 				if returned && write(streamMessage{Type: "returned", Capture: capture}) != nil {
 					return
 				}

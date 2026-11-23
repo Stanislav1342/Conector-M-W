@@ -1,5 +1,5 @@
 #!/bin/bash
-# Publishes a new Prilo version on GitHub Releases.
+# Publishes a new Conector-M-W version on GitHub Releases.
 # Usage: scripts/release.sh 0.9.1 [notes.md]
 # The Mac app and the Windows receiver find the release through the GitHub API
 # and offer the update; other people download the files from the release page.
@@ -17,8 +17,8 @@ plist=mac/Info.plist
 
 command -v gh >/dev/null || { echo "Install GitHub CLI: brew install gh" >&2; exit 1; }
 gh auth status >/dev/null 2>&1 || { echo "Log in first: gh auth login" >&2; exit 1; }
-repository="$(/usr/bin/plutil -extract PriloUpdateRepository raw "$plist")"
-[[ "$repository" == */* && "$repository" != OWNER/* ]] || { echo "Set PriloUpdateRepository in $plist" >&2; exit 1; }
+repository="$(/usr/bin/plutil -extract ConectorUpdateRepository raw "$plist")"
+[[ "$repository" == */* && "$repository" != OWNER/* ]] || { echo "Set ConectorUpdateRepository in $plist" >&2; exit 1; }
 [[ -z "$(git status --porcelain)" ]] || { echo "Commit or stash your changes first." >&2; exit 1; }
 [[ "$(git branch --show-current)" == main ]] || { echo "Release from the main branch." >&2; exit 1; }
 if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
@@ -48,24 +48,24 @@ trap restore ERR
 
 scripts/check.sh
 ./build.sh
-for file in dist/Prilo-Mac.zip dist/PriloReceiver.exe dist/PriloReceiver-arm64.exe; do
+for file in dist/Conector-M-W-Mac.zip dist/ConectorMWReceiver.exe dist/ConectorMWReceiver-arm64.exe; do
     [[ -s "$file" ]] || { echo "Missing $file" >&2; exit 1; }
 done
-[[ "$(/usr/bin/plutil -extract CFBundleShortVersionString raw dist/Prilo.app/Contents/Info.plist)" == "$version" ]]
+[[ "$(/usr/bin/plutil -extract CFBundleShortVersionString raw dist/Conector-M-W.app/Contents/Info.plist)" == "$version" ]]
 
 git add "$plist"
 git commit -m "chore: release $tag"
 trap - ERR
-git tag -a "$tag" -m "Prilo $version"
+git tag -a "$tag" -m "Conector-M-W $version"
 git push origin main "$tag"
 
-assets=(dist/Prilo-Mac.zip dist/PriloReceiver.exe dist/PriloReceiver-arm64.exe)
-for package in dist/homebridge-prilo-*.tgz; do
+assets=(dist/Conector-M-W-Mac.zip dist/ConectorMWReceiver.exe dist/ConectorMWReceiver-arm64.exe)
+for package in dist/homebridge-conector-m-w-*.tgz; do
     [[ -e "$package" ]] && assets+=("$package")
 done
 if [[ -n "$notes" ]]; then
-    gh release create "$tag" "${assets[@]}" --repo "$repository" --title "Prilo $version" --notes-file "$notes"
+    gh release create "$tag" "${assets[@]}" --repo "$repository" --title "Conector-M-W $version" --notes-file "$notes"
 else
-    gh release create "$tag" "${assets[@]}" --repo "$repository" --title "Prilo $version" --generate-notes
+    gh release create "$tag" "${assets[@]}" --repo "$repository" --title "Conector-M-W $version" --generate-notes
 fi
 echo "Published $tag: https://github.com/$repository/releases/tag/$tag"

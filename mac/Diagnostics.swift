@@ -3,15 +3,15 @@ import OSLog
 
 final class Diagnostics {
     static let shared = Diagnostics()
-    private let queue = DispatchQueue(label: "com.artlee12.prilo.diagnostics")
-    private let logger = Logger(subsystem: "com.artlee12.prilo", category: "diagnostics")
+    private let queue = DispatchQueue(label: "com.stanislav1342.conector-m-w.diagnostics")
+    private let logger = Logger(subsystem: "com.stanislav1342.conector-m-w", category: "diagnostics")
     private let clock = ISO8601DateFormatter()
     let file: URL
     private let limit = 256 * 1024
 
     init(directory: URL = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Logs/Prilo", isDirectory: true)) {
-        file = directory.appendingPathComponent("prilo.log")
+        .appendingPathComponent("Library/Logs/Conector-M-W", isDirectory: true)) {
+        file = directory.appendingPathComponent("conector-m-w.log")
         clock.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     }
 
@@ -27,7 +27,7 @@ final class Diagnostics {
                 let attributes = try? manager.attributesOfItem(atPath: self.file.path)
                 let size = (attributes?[.size] as? NSNumber)?.intValue ?? 0
                 if size + line.count > self.limit {
-                    let previous = directory.appendingPathComponent("prilo.previous.log")
+                    let previous = directory.appendingPathComponent("conector-m-w.previous.log")
                     if manager.fileExists(atPath: previous.path) { try manager.removeItem(at: previous) }
                     try manager.moveItem(at: self.file, to: previous)
                 }
@@ -50,7 +50,7 @@ final class Diagnostics {
             let latest = (try? String(contentsOf: file, encoding: .utf8)) ?? ""
             let lines = latest.split(separator: "\n")
             if lines.count >= 120 { return lines.suffix(120).joined(separator: "\n") }
-            let previous = file.deletingLastPathComponent().appendingPathComponent("prilo.previous.log")
+            let previous = file.deletingLastPathComponent().appendingPathComponent("conector-m-w.previous.log")
             let earlier = (try? String(contentsOf: previous, encoding: .utf8)) ?? ""
             return (earlier.split(separator: "\n").suffix(120 - lines.count) + lines).joined(separator: "\n")
         }

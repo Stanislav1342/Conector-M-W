@@ -2,8 +2,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 root="$PWD"
+if [ -d "$root/.local/llvm-mingw/bin" ]; then
+    export PATH="$root/.local/llvm-mingw/bin:$PATH"
+fi
 version="$(plutil -extract CFBundleShortVersionString raw mac/Info.plist)"
-package_version="${PRILO_PYTHON_VERSION:-$version}"
+package_version="${CONECTOR_PYTHON_VERSION:-${PRILO_PYTHON_VERSION:-$version}}"
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
 output="$root/dist/python"
@@ -11,8 +14,8 @@ mkdir -p "$output"
 
 for target in "${@:-amd64}"; do
     case "$target" in
-        amd64) tag=win_amd64; compiler="${PRILO_CC_AMD64:-x86_64-w64-mingw32-clang}" ;;
-        arm64) tag=win_arm64; compiler="${PRILO_CC_ARM64:-aarch64-w64-mingw32-clang}" ;;
+        amd64) tag=win_amd64; compiler="${CONECTOR_CC_AMD64:-${PRILO_CC_AMD64:-x86_64-w64-mingw32-clang}}" ;;
+        arm64) tag=win_arm64; compiler="${CONECTOR_CC_ARM64:-${PRILO_CC_ARM64:-aarch64-w64-mingw32-clang}}" ;;
         *) echo "Unsupported target: $target" >&2; exit 2 ;;
     esac
     tree="$stage/$tag"
@@ -22,14 +25,14 @@ for target in "${@:-amd64}"; do
     (
         cd windows
         export GOOS=windows GOARCH="$target" CGO_ENABLED=1 CC="$compiler"
-        go build -buildmode=c-shared -tags prilo_library -trimpath \
+        go build -buildmode=c-shared -tags conector_library -trimpath \
             -ldflags "-X main.version=$package_version -linkmode=external -extldflags=-static" \
             -o "$tree/prilo_receiver/prilo_receiver.dll" .
         go_root="$(go env GOROOT)"
         go_license="$go_root/LICENSE"
         if [ ! -f "$go_license" ]; then go_license="$go_root/../LICENSE"; fi
         cp "$go_license" "$info/licenses/Go-LICENSE"
-        go list -deps -tags prilo_library -f '{{with .Module}}{{if not .Main}}{{.Path}} {{.Dir}}{{end}}{{end}}' . |
+        go list -deps -tags conector_library -f '{{with .Module}}{{if not .Main}}{{.Path}} {{.Dir}}{{end}}{{end}}' . |
             sort -u | while read -r module directory; do
                 [ -n "$module" ] || continue
                 for filename in LICENSE LICENSE.md LICENSE.txt NOTICE NOTICE.txt; do
@@ -44,9 +47,9 @@ for target in "${@:-amd64}"; do
 Metadata-Version: 2.4
 Name: prilo-receiver
 Version: $package_version
-Summary: Native Windows receiver for the Prilo Mac app
+Summary: Native Windows receiver for Conector-M-W
 Requires-Python: >=3.9
-Project-URL: Source, https://github.com/artlee12/prilo
+Project-URL: Source, https://github.com/Stanislav1342/Conector-M-W
 Description-Content-Type: text/markdown
 METADATA
     for license in "$info"/licenses/*; do
@@ -56,9 +59,9 @@ METADATA
     cat python/README.md >> "$info/METADATA"
     cat > "$info/WHEEL" <<WHEEL
 Wheel-Version: 1.0
-Generator: Prilo
+Generator: Conector-M-W
 Root-Is-Purelib: false
 Tag: py3-none-$tag
 WHEEL
-    "${PRILO_PYTHON:-python3}" -m wheel pack "$tree" --dest-dir "$output"
+    "${CONECTOR_PYTHON:-${PRILO_PYTHON:-python3}}" -m wheel pack "$tree" --dest-dir "$output"
 done

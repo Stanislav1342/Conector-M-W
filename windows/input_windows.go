@@ -11,7 +11,8 @@ var user32 = syscall.NewLazyDLL("user32.dll")
 var sendInput = user32.NewProc("SendInput")
 var getCursorPos = user32.NewProc("GetCursorPos")
 var setCursorPos = user32.NewProc("SetCursorPos")
-var getSystemMetrics = user32.NewProc("GetSystemMetrics")
+var monitorFromRect = user32.NewProc("MonitorFromRect")
+var getMonitorInfoW = user32.NewProc("GetMonitorInfoW")
 var setThreadDPI = user32.NewProc("SetThreadDpiAwarenessContext")
 
 func setDPIAware() {
@@ -33,12 +34,48 @@ func cursorDPI() func() {
 	}
 }
 
+type winRect struct {
+	left, top, right, bottom int32
+}
+
+type monitorInfo struct {
+	size    uint32
+	monitor winRect
+	work    winRect
+	flags   uint32
+}
+
+// pointAtBottom reports whether (x, y) rests on the bottom edge of its monitor
+// and no other Windows monitor lies directly below it. Caller must hold cursorDPI().
+func pointAtBottom(x, y int32) bool {
+	const (
+		monitorDefaultToNull    = 0
+		monitorDefaultToNearest = 2
+	)
+	probe := winRect{left: x, top: y, right: x + 1, bottom: y + 1}
+	mon, _, _ := monitorFromRect.Call(uintptr(unsafe.Pointer(&probe)), monitorDefaultToNearest)
+	if mon == 0 {
+		return false
+	}
+	var mi monitorInfo
+	mi.size = uint32(unsafe.Sizeof(mi))
+	ok, _, _ := getMonitorInfoW.Call(mon, uintptr(unsafe.Pointer(&mi)))
+	if ok == 0 || y < mi.monitor.bottom-1 {
+		return false
+	}
+	below := winRect{left: x, top: mi.monitor.bottom, right: x + 1, bottom: mi.monitor.bottom + 1}
+	nextMon, _, _ := monitorFromRect.Call(uintptr(unsafe.Pointer(&below)), monitorDefaultToNull)
+	return nextMon == 0
+}
+
 func atBottom() bool {
 	defer cursorDPI()()
 	var point [2]int32
 	ok, _, _ := getCursorPos.Call(uintptr(unsafe.Pointer(&point)))
-	height, _, _ := getSystemMetrics.Call(1)
-	return ok != 0 && point[1] >= int32(height)-1
+	if ok == 0 {
+		return false
+	}
+	return pointAtBottom(point[0], point[1])
 }
 
 // The union is sized and aligned by MOUSEINPUT on 64-bit Windows.
@@ -80,11 +117,14 @@ func (e event) send() error {
 	switch e.Kind {
 	case "enter":
 		defer cursorDPI()()
-		width, _, _ := getSystemMetrics.Call(0)
-		height, _, _ := getSystemMetrics.Call(1)
-		x := int32(int64(e.X) * int64(width-1) / 65535)
-		y := max(0, int32(height)-20)
-		return moveCursor(x, y)
+		var point [2]int32
+		if ok, _, err := getCursorPos.Call(uintptr(unsafe.Pointer(&point))); ok == 0 {
+			return fmt.Errorf("GetCursorPos failed: %v", err)
+		}
+		if pointAtBottom(point[0], point[1]) {
+			return moveCursor(point[0], point[1]-4)
+		}
+		return nil
 	case "move":
 		defer cursorDPI()()
 		var point [2]int32

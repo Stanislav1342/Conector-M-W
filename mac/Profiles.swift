@@ -31,6 +31,14 @@ struct ControlSettings {
         get { defaults.object(forKey: "commandIsControl") as? Bool ?? true }
         set { defaults.set(newValue, forKey: "commandIsControl") }
     }
+    var commandSpaceSwitchesLanguage: Bool {
+        get { defaults.object(forKey: "commandSpaceSwitchesLanguage") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "commandSpaceSwitchesLanguage") }
+    }
+    var clipboardSync: Bool {
+        get { defaults.object(forKey: "clipboardSync") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "clipboardSync") }
+    }
     var speed: Double {
         get { defaults.object(forKey: "cursorSpeed") as? Double ?? 1 }
         set { defaults.set(newValue, forKey: "cursorSpeed") }
@@ -126,7 +134,7 @@ final class Profiles {
 
     private func keychainQuery(_ id: UUID) -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword,
-         kSecAttrService as String: "com.artlee12.prilo.pc",
+         kSecAttrService as String: "com.stanislav1342.conector-m-w.pc",
          kSecAttrAccount as String: id.uuidString]
     }
 

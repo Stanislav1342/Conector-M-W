@@ -121,7 +121,7 @@ final class Connection {
     }
 }
 
-final class Prilo: NSObject, NSApplicationDelegate {
+final class ConectorApp: NSObject, NSApplicationDelegate {
     var item: NSStatusItem!
     let status = NSMenuItem(title: "Отключено", action: nil, keyEquivalent: "")
     var connection: Connection?
@@ -170,6 +170,9 @@ final class Prilo: NSObject, NSApplicationDelegate {
     var lastSend = Date.distantPast
     var localButtons: Set<UInt16> = []
     var localKeys: Set<Int64> = []
+    var lastClipboardChangeCount = NSPasteboard.general.changeCount
+    var lastClipboardCheck = Date.distantPast
+    var lastSyncedClipboard: String?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
@@ -177,17 +180,17 @@ final class Prilo: NSObject, NSApplicationDelegate {
         installMainMenu()
         window = ConnectionWindow(owner: self)
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let symbol = NSImage(systemSymbolName: "display.2", accessibilityDescription: "Prilo") {
+        if let symbol = NSImage(systemSymbolName: "display.2", accessibilityDescription: "Conector-M-W") {
             symbol.isTemplate = true
             item.button?.image = symbol
         } else {
-            item.button?.title = "Prilo"
+            item.button?.title = "Conector-M-W"
         }
         let menu = NSMenu()
         menu.autoenablesItems = false
         status.isEnabled = false
         menu.addItem(status)
-        menu.addItem(menuItem("Открыть Prilo", action: #selector(showWindow)))
+        menu.addItem(menuItem("Открыть Conector-M-W", action: #selector(showWindow)))
         pauseItem = menuItem("Приостановить управление", action: #selector(togglePause))
         disconnectItem = menuItem("Отключить Windows", action: #selector(disconnect))
         menu.addItem(pauseItem)
@@ -195,7 +198,7 @@ final class Prilo: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(updateItem)
         menu.addItem(menuItem("Скопировать журнал", action: #selector(copyDiagnostics)))
-        menu.addItem(menuItem("Выйти из Prilo", action: #selector(quit)))
+        menu.addItem(menuItem("Выйти из Conector-M-W", action: #selector(quit)))
         item.menu = menu
 
         timer = Timer(timeInterval: 0.008, repeats: true) { [weak self] _ in self?.tick() }
@@ -225,7 +228,7 @@ final class Prilo: NSObject, NSApplicationDelegate {
 
     func refreshUpdateItem() {
         let available = window.model.updates.available
-        updateItem.title = available.map { "Установить Prilo \($0.version.description)…" } ?? "Проверить обновления…"
+        updateItem.title = available.map { "Установить Conector-M-W \($0.version.description)…" } ?? "Проверить обновления…"
     }
 
     /// Opens the settings pane, where the update section lives, and checks if nothing is pending.
@@ -248,11 +251,11 @@ final class Prilo: NSObject, NSApplicationDelegate {
 
     func installMainMenu() {
         let bar = NSMenu()
-        let appMenu = NSMenu(title: "Prilo")
-        appMenu.addItem(menuItem("Открыть Prilo", action: #selector(showWindow), key: ","))
+        let appMenu = NSMenu(title: "Conector-M-W")
+        appMenu.addItem(menuItem("Открыть Conector-M-W", action: #selector(showWindow), key: ","))
         appMenu.addItem(menuItem("Закрыть окно", action: #selector(closeWindow), key: "w"))
         appMenu.addItem(.separator())
-        appMenu.addItem(menuItem("Выйти из Prilo", action: #selector(quit), key: "q"))
+        appMenu.addItem(menuItem("Выйти из Conector-M-W", action: #selector(quit), key: "q"))
         let appEntry = NSMenuItem()
         appEntry.submenu = appMenu
         bar.addItem(appEntry)
@@ -348,7 +351,7 @@ final class Prilo: NSObject, NSApplicationDelegate {
         guard connection == nil, releasing == nil else { return }
         cancelAutomaticConnection()
         guard peer.fingerprint.hasPrefix(code.prefix) else {
-            display(.error("Код не совпадает с выбранным ПК. Проверь имя ПК и код в окне Prilo Receiver."))
+            display(.error("Код не совпадает с выбранным ПК. Проверь имя ПК и код в окне Conector-M-W Receiver."))
             return
         }
         guard let endpoint = URL(string: "https://\(peer.host):43821/pair"),
@@ -379,7 +382,7 @@ final class Prilo: NSObject, NSApplicationDelegate {
                 self.window.fillCredentials(credentials)
                 self.beginConnection(credentials)
             case .http(401):
-                self.display(.error("Код использован, истёк или введён неверно. Возьми новый код в меню Prilo в трее Windows."))
+                self.display(.error("Код использован, истёк или введён неверно. Возьми новый код в меню Conector-M-W в трее Windows."))
             default:
                 self.display(.error(self.connectionMessage(result)))
             }
@@ -444,6 +447,8 @@ final class Prilo: NSObject, NSApplicationDelegate {
         reconnectPaused = false
         attemptedTap = false
         lastSend = Date()
+        lastClipboardChangeCount = NSPasteboard.general.changeCount
+        lastSyncedClipboard = nil
         retryDelay = 3
         refreshPermissions()
         updateControlStatus()
@@ -482,7 +487,7 @@ final class Prilo: NSObject, NSApplicationDelegate {
                 reconnectPaused = wasPaused
                 retryAt = Date().addingTimeInterval(retryDelay)
                 retryDelay = min(retryDelay * 2, 20)
-                display(.error(connectionMessage(result) + " Prilo попробует подключиться снова."))
+                display(.error(connectionMessage(result) + " Conector-M-W попробует подключиться снова."))
                 return
             }
         default: break
@@ -498,6 +503,8 @@ final class Prilo: NSObject, NSApplicationDelegate {
             if controlSettings.animate { cue.show(at: entry, entering: true) }
         case "returned" where remote && message.capture == captureID:
             leave(reason: "Windows edge")
+        case "clipboard":
+            if let text = message.text { applyRemoteClipboard(text) }
         case "inputUnavailable": connectionFailed(.http(503))
         case "invalid": connectionFailed(.failure(.cannotParseResponse))
         default: break
@@ -517,9 +524,9 @@ final class Prilo: NSObject, NSApplicationDelegate {
             return "Не удалось подтвердить сертификат. Сверь отпечаток с пунктом «Данные для ручного подключения…» в трее Windows."
         case .failure(.timedOut), .failure(.cannotConnectToHost), .failure(.notConnectedToInternet),
              .failure(.networkConnectionLost):
-            return result.unreachableHint ?? "Приёмник не ответил. Проверь IP, локальную сеть и доступ Prilo к ней в настройках macOS."
+            return result.unreachableHint ?? "Приёмник не ответил. Проверь IP, локальную сеть и доступ Conector-M-W к ней в настройках macOS."
         default:
-            return "Получен неожиданный ответ (\(result.description)). Проверь журнал приёмника в трее Windows и журнал Prilo."
+            return "Получен неожиданный ответ (\(result.description)). Проверь журнал приёмника в трее Windows и журнал Conector-M-W."
         }
     }
 
@@ -636,7 +643,36 @@ final class Prilo: NSObject, NSApplicationDelegate {
             lastInputCheck = now
             if window.isVisible || linked { refreshPermissions() }
         }
+        if linked, now.timeIntervalSince(lastClipboardCheck) >= 0.25 {
+            lastClipboardCheck = now
+            syncLocalClipboardIfNeeded()
+        }
         flush()
+    }
+
+    func syncLocalClipboardIfNeeded() {
+        guard linked, controlSettings.clipboardSync, let channel, channel.ready else { return }
+        let count = NSPasteboard.general.changeCount
+        guard count != lastClipboardChangeCount else { return }
+        lastClipboardChangeCount = count
+        guard let raw = NSPasteboard.general.string(forType: .string) else {
+            lastSyncedClipboard = nil
+            return
+        }
+        let normalized = normalizeClipboardText(raw)
+        guard !normalized.isEmpty, normalized.utf8.count <= maxClipboardBytes, normalized != lastSyncedClipboard else { return }
+        lastSyncedClipboard = normalized
+        channel.sendClipboard(normalized)
+    }
+
+    func applyRemoteClipboard(_ text: String) {
+        guard controlSettings.clipboardSync else { return }
+        let normalized = normalizeClipboardText(text)
+        guard !normalized.isEmpty, normalized.utf8.count <= maxClipboardBytes else { return }
+        lastSyncedClipboard = normalized
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(normalized, forType: .string)
+        lastClipboardChangeCount = NSPasteboard.general.changeCount
     }
 
     func installTap() -> Bool {
@@ -649,7 +685,7 @@ final class Prilo: NSObject, NSApplicationDelegate {
                                            options: .defaultTap, eventsOfInterest: mask,
                                            callback: { _, type, event, context in
             guard let context else { return Unmanaged.passUnretained(event) }
-            return Unmanaged<Prilo>.fromOpaque(context).takeUnretainedValue().handle(type, event)
+            return Unmanaged<ConectorApp>.fromOpaque(context).takeUnretainedValue().handle(type, event)
         }, userInfo: Unmanaged.passUnretained(self).toOpaque()) else { return false }
         let source = CFMachPortCreateRunLoopSource(nil, port, 0)
         tap = port
@@ -868,18 +904,20 @@ final class Prilo: NSObject, NSApplicationDelegate {
             handoffConfirmed = false
             capturedBounds = bounds
             pointer = PointerMotion(speed: controlSettings.speed)
-            keyboard = RemoteKeyboard(commandIsControl: controlSettings.commandIsControl)
+            keyboard = RemoteKeyboard(commandIsControl: controlSettings.commandIsControl,
+                                      commandSpaceSwitchesLanguage: controlSettings.commandSpaceSwitchesLanguage)
             lastWarp = .distantPast
             entry = CGPoint(x: event.location.x, y: bounds.minY)
             let frontmost = NSWorkspace.shared.frontmostApplication
             previousApp = frontmost?.processIdentifier == ProcessInfo.processInfo.processIdentifier ? nil : frontmost
-            // Keep the setup window from being raised when Prilo takes focus for capture.
+            // Keep the setup window from being raised when Conector-M-W takes focus for capture.
             window.orderOut(nil)
             NSApp.activate(ignoringOtherApps: true)
             updateRemoteCursor()
             if !cursorDetached { warpForCapture() }
             log.record("control entered Windows")
             updateControlStatus()
+            syncLocalClipboardIfNeeded()
             pending.append(Input(kind: "enter", x: entryPosition(x: entry.x, in: bounds)))
             return nil
         }
@@ -930,7 +968,7 @@ func CGGetOnlineBuiltInDisplay() -> CGDirectDisplayID {
 }
 
 let app = NSApplication.shared
-let delegate = Prilo()
+let delegate = ConectorApp()
 app.delegate = delegate
 app.setActivationPolicy(.regular)
 app.run()

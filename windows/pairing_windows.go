@@ -43,7 +43,7 @@ func loadPairing() (pairing, error) {
 	if err != nil {
 		return pairing{}, err
 	}
-	directory := filepath.Join(root, "Prilo")
+	directory := filepath.Join(root, "Conector-M-W")
 	path := filepath.Join(directory, "pairing.dat")
 	encrypted, err := os.ReadFile(path)
 	if err == nil {

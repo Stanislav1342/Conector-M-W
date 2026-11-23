@@ -13,7 +13,7 @@ enum FormField: Hashable {
     case name, address, code, fingerprint
 }
 
-/// State shared between the app controller (Prilo) and the SwiftUI window.
+/// State shared between the app controller (ConectorApp) and the SwiftUI window.
 final class WindowModel: ObservableObject {
     @Published var state: ConnectionWindow.State = .idle
     @Published var profiles: [PCProfile] = []
@@ -35,11 +35,11 @@ final class WindowModel: ObservableObject {
     @Published var renaming: PCProfile?
     @Published var settings = ControlSettings()
 
-    weak var owner: Prilo?
+    weak var owner: ConectorApp?
     let power: PowerModel
     let updates = UpdateModel()
 
-    init(owner: Prilo) {
+    init(owner: ConectorApp) {
         self.owner = owner
         power = PowerModel(profiles: owner.profiles)
         power.discoveredHost = { [weak owner] fingerprint in
@@ -108,7 +108,7 @@ final class WindowModel: ObservableObject {
         pairing = nil
         guard editing else { return }
         guard let invitation = PairingCode(text) else {
-            notice = "Вставь код целиком из строки Prilo pairing code."
+            notice = "Вставь код целиком из строки Conector-M-W pairing code."
             return
         }
         owner?.pair(peer, code: invitation)
@@ -155,10 +155,10 @@ final class ConnectionWindow: NSWindow {
 
         var detail: String {
             switch self {
-            case .idle: return "Запусти Prilo Receiver на Windows и выбери «Найти ПК в сети». Код сопряжения есть в меню значка Prilo в трее Windows."
+            case .idle: return "Запусти Conector-M-W Receiver на Windows и выбери «Найти ПК в сети». Код сопряжения есть в меню значка Conector-M-W в трее Windows."
             case .connecting: return "Проверяем связь с приёмником, сертификат и код доступа."
             case .disconnecting: return "Завершаем передачу и отпускаем зажатые клавиши и кнопки."
-            case .needsPermission: return "Связь с Windows есть. Чтобы управлять мышью и клавиатурой, включи доступ для Prilo ниже."
+            case .needsPermission: return "Связь с Windows есть. Чтобы управлять мышью и клавиатурой, включи доступ для Conector-M-W ниже."
             case .inputUnavailable: return "Разрешение выдано, но macOS не дала перехватить ввод. Проверь «Мониторинг ввода», затем нажми «Проверить доступ»."
             case .ready: return "Веди курсор вверх за край MacBook. Вернуться можно через нижний край Windows или по Ctrl + Option + Esc."
             case .remote: return "Вернуться на Mac можно через нижний край Windows или по Ctrl + Option + Esc."
@@ -197,7 +197,7 @@ final class ConnectionWindow: NSWindow {
 
     var inputMonitoring: Bool { model.monitoring }
 
-    init(owner: Prilo) {
+    init(owner: ConectorApp) {
         model = WindowModel(owner: owner)
         super.init(contentRect: NSRect(x: 0, y: 0, width: 880, height: 640),
                    styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
@@ -206,12 +206,12 @@ final class ConnectionWindow: NSWindow {
         hosting.sceneBridgingOptions = [.toolbars, .title]
         hosting.sizingOptions = [.minSize]
         contentViewController = hosting
-        title = "Prilo"
+        title = "Conector-M-W"
         toolbarStyle = .unified
         isReleasedWhenClosed = false
         setContentSize(NSSize(width: 880, height: 640))
-        setFrameAutosaveName("PriloMainWindow")
-        if !setFrameUsingName("PriloMainWindow") { center() }
+        setFrameAutosaveName("ConectorMainWindow")
+        if !setFrameUsingName("ConectorMainWindow") { center() }
     }
 
     func setPermissions(accessibility: Bool, monitoring: Bool) {
@@ -272,7 +272,7 @@ final class ConnectionWindow: NSWindow {
         model.code = secrets?.code ?? ""
         model.fingerprint = secrets?.fingerprint ?? ""
         model.pane = .pc(selected.id)
-        model.notice = secrets == nil ? "Prilo не получил сохранённые ключи. Выбери этот ПК в боковой панели ещё раз. Если macOS спросит доступ к Связке ключей, нажми «Всегда разрешать»." : ""
+        model.notice = secrets == nil ? "Conector-M-W не получил сохранённые ключи. Выбери этот ПК в боковой панели ещё раз. Если macOS спросит доступ к Связке ключей, нажми «Всегда разрешать»." : ""
     }
 
     func updateAddress(_ host: String) { model.address = host }

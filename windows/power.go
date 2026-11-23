@@ -22,7 +22,7 @@ type powerController struct {
 
 func powerToken(inputToken string) string {
 	mac := hmac.New(sha256.New, []byte(inputToken))
-	mac.Write([]byte("prilo-power-v1"))
+	mac.Write([]byte("conector-power-v1"))
 	return hex.EncodeToString(mac.Sum(nil))
 }
 

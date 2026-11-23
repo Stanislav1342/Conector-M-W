@@ -112,9 +112,16 @@ func entryPosition(x: CGFloat, in bounds: CGRect) -> Int32 {
 
 /// Scoped token for /power/* endpoints. Must match powerToken() in windows/power.go.
 func powerCode(accessCode: String) -> String {
-    let signature = HMAC<SHA256>.authenticationCode(for: Data("prilo-power-v1".utf8),
+    let signature = HMAC<SHA256>.authenticationCode(for: Data("conector-power-v1".utf8),
                                                      using: SymmetricKey(data: Data(accessCode.utf8)))
     return signature.map { String(format: "%02x", $0) }.joined()
+}
+
+let maxClipboardBytes = 512 * 1024
+
+func normalizeClipboardText(_ text: String) -> String {
+    text.replacingOccurrences(of: "\r\n", with: "\n")
+        .replacingOccurrences(of: "\r", with: "\n")
 }
 
 // MARK: - Updates
@@ -158,7 +165,7 @@ struct ReleaseInfo: Equatable {
     let page: URL
     let download: URL
 
-    static let macAsset = "Prilo-Mac.zip"
+    static let macAsset = "Conector-M-W-Mac.zip"
 
     /// Parses the GitHub API JSON; drafts, pre-releases and releases without the Mac archive are ignored.
     static func parse(_ data: Data) -> ReleaseInfo? {

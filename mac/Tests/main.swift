@@ -115,6 +115,70 @@ test("Caps Lock toggles with a press and release pair") {
     expectEqual(keyboard.events(for: 57, down: false, flagsChanged: true), [key(0x3a, true), key(0x3a, false)])
 }
 
+test("Cmd + Space switches language via Shift + Alt when Command maps to Ctrl") {
+    var keyboard = RemoteKeyboard(commandIsControl: true, commandSpaceSwitchesLanguage: true)
+    expectEqual(keyboard.events(for: 55, down: true, flagsChanged: true), [key(0x1d, true)])
+    expectEqual(keyboard.events(for: 49, down: true, flagsChanged: false),
+                [key(0x1d, false), key(0x2a, true), key(0x38, true)])
+    expectEqual(keyboard.events(for: 49, down: true, flagsChanged: false), [], "auto-repeat ignored")
+    expectEqual(keyboard.events(for: 49, down: false, flagsChanged: false),
+                [key(0x38, false), key(0x2a, false)])
+    expectEqual(keyboard.events(for: 55, down: false, flagsChanged: true), [])
+}
+
+test("Cmd + Space switches language safely when Command maps to Win") {
+    var keyboard = RemoteKeyboard(commandIsControl: false, commandSpaceSwitchesLanguage: true)
+    expectEqual(keyboard.events(for: 55, down: true, flagsChanged: true), [key(0x15b, true)])
+    expectEqual(keyboard.events(for: 49, down: true, flagsChanged: false),
+                [key(0x2a, true), key(0x15b, false), key(0x38, true)])
+    expectEqual(keyboard.events(for: 49, down: false, flagsChanged: false),
+                [key(0x38, false), key(0x2a, false)])
+    expectEqual(keyboard.events(for: 55, down: false, flagsChanged: true), [])
+}
+
+test("repeated Space taps while holding Cmd cycle languages and C restores Ctrl") {
+    var keyboard = RemoteKeyboard(commandIsControl: true, commandSpaceSwitchesLanguage: true)
+    _ = keyboard.events(for: 55, down: true, flagsChanged: true)
+    _ = keyboard.events(for: 49, down: true, flagsChanged: false)
+    _ = keyboard.events(for: 49, down: false, flagsChanged: false)
+    expectEqual(keyboard.events(for: 49, down: true, flagsChanged: false),
+                [key(0x2a, true), key(0x38, true)])
+    expectEqual(keyboard.events(for: 49, down: false, flagsChanged: false),
+                [key(0x38, false), key(0x2a, false)])
+    expectEqual(keyboard.events(for: 8, down: true, flagsChanged: false),
+                [key(0x1d, true), key(0x2e, true)])
+    expectEqual(keyboard.events(for: 8, down: false, flagsChanged: false), [key(0x2e, false)])
+    expectEqual(keyboard.events(for: 55, down: false, flagsChanged: true), [key(0x1d, false)])
+}
+
+test("releasing Cmd before Space still releases Alt and Shift on Space up") {
+    var keyboard = RemoteKeyboard(commandIsControl: true, commandSpaceSwitchesLanguage: true)
+    _ = keyboard.events(for: 55, down: true, flagsChanged: true)
+    _ = keyboard.events(for: 49, down: true, flagsChanged: false)
+    expectEqual(keyboard.events(for: 55, down: false, flagsChanged: true), [])
+    expectEqual(keyboard.events(for: 49, down: false, flagsChanged: false),
+                [key(0x38, false), key(0x2a, false)])
+}
+
+test("Cmd + Shift + Space, Ctrl + Space, and disabled setting pass through normally") {
+    var keyboard = RemoteKeyboard(commandIsControl: true, commandSpaceSwitchesLanguage: true)
+    expectEqual(keyboard.events(for: 55, down: true, flagsChanged: true), [key(0x1d, true)])
+    expectEqual(keyboard.events(for: 56, down: true, flagsChanged: true), [key(0x2a, true)])
+    expectEqual(keyboard.events(for: 49, down: true, flagsChanged: false), [key(0x39, true)])
+    _ = keyboard.events(for: 49, down: false, flagsChanged: false)
+    _ = keyboard.events(for: 56, down: false, flagsChanged: true)
+    _ = keyboard.events(for: 55, down: false, flagsChanged: true)
+
+    expectEqual(keyboard.events(for: 59, down: true, flagsChanged: true), [key(0x1d, true)])
+    expectEqual(keyboard.events(for: 49, down: true, flagsChanged: false), [key(0x39, true)])
+    _ = keyboard.events(for: 49, down: false, flagsChanged: false)
+    _ = keyboard.events(for: 59, down: false, flagsChanged: true)
+
+    var disabled = RemoteKeyboard(commandIsControl: true, commandSpaceSwitchesLanguage: false)
+    expectEqual(disabled.events(for: 55, down: true, flagsChanged: true), [key(0x1d, true)])
+    expectEqual(disabled.events(for: 49, down: true, flagsChanged: false), [key(0x39, true)])
+}
+
 test("every scan code is accepted by the receiver") {
     // Mirrors event.valid() in windows/main.go.
     for (mac, code) in scanCodes {
@@ -160,7 +224,12 @@ test("entry position never leaves the range the receiver accepts") {
 test("power code matches the receiver's powerToken derivation") {
     // Same vector as TestPowerTokenDerivation in windows/pairing_test.go, cross-checked with openssl.
     expectEqual(powerCode(accessCode: "00112233445566778899aabbccddeeff"),
-                "f8bcdd75a07ae2b7135b348261a0321d6b6aba4fc8b067b54928507d65f317b8")
+                "db216d5682cfc00e69ff8b315d9b9b0e0b2420229c76815817f384b8273ff20e")
+}
+
+test("clipboard text normalizes CRLF and CR line endings") {
+    expectEqual(normalizeClipboardText("a\r\nb\rc\nd"), "a\nb\nc\nd")
+    expectEqual(normalizeClipboardText(""), "")
 }
 
 // MARK: - Pairing code
@@ -230,20 +299,20 @@ test("release versions compare numerically") {
 
 test("release JSON yields the Mac archive") {
     let json = """
-    {"tag_name":"v0.9.0","body":"Новое","html_url":"https://github.com/o/prilo/releases/tag/v0.9.0","draft":false,"prerelease":false,
-     "assets":[{"name":"PriloReceiver.exe","browser_download_url":"https://github.com/o/prilo/releases/download/v0.9.0/PriloReceiver.exe"},
-               {"name":"Prilo-Mac.zip","browser_download_url":"https://github.com/o/prilo/releases/download/v0.9.0/Prilo-Mac.zip"}]}
+    {"tag_name":"v0.9.0","body":"Новое","html_url":"https://github.com/o/conector/releases/tag/v0.9.0","draft":false,"prerelease":false,
+     "assets":[{"name":"ConectorMWReceiver.exe","browser_download_url":"https://github.com/o/conector/releases/download/v0.9.0/ConectorMWReceiver.exe"},
+               {"name":"Conector-M-W-Mac.zip","browser_download_url":"https://github.com/o/conector/releases/download/v0.9.0/Conector-M-W-Mac.zip"}]}
     """
     let info = ReleaseInfo.parse(Data(json.utf8))
     expectEqual(info?.version.description, "0.9")
     expectEqual(info?.notes, "Новое")
-    expectEqual(info?.download.lastPathComponent, "Prilo-Mac.zip")
+    expectEqual(info?.download.lastPathComponent, "Conector-M-W-Mac.zip")
 }
 
 test("release JSON without archive, prerelease or https is ignored") {
     let noAsset = #"{"tag_name":"v1","html_url":"https://x/y","assets":[]}"#
-    let pre = #"{"tag_name":"v1","html_url":"https://x/y","prerelease":true,"assets":[{"name":"Prilo-Mac.zip","browser_download_url":"https://x/z"}]}"#
-    let plain = #"{"tag_name":"v1","html_url":"https://x/y","assets":[{"name":"Prilo-Mac.zip","browser_download_url":"http://x/z"}]}"#
+    let pre = #"{"tag_name":"v1","html_url":"https://x/y","prerelease":true,"assets":[{"name":"Conector-M-W-Mac.zip","browser_download_url":"https://x/z"}]}"#
+    let plain = #"{"tag_name":"v1","html_url":"https://x/y","assets":[{"name":"Conector-M-W-Mac.zip","browser_download_url":"http://x/z"}]}"#
     expect(ReleaseInfo.parse(Data(noAsset.utf8)) == nil)
     expect(ReleaseInfo.parse(Data(pre.utf8)) == nil)
     expect(ReleaseInfo.parse(Data(plain.utf8)) == nil)

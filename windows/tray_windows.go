@@ -12,7 +12,7 @@ import (
 	"fyne.io/systray"
 )
 
-//go:embed prilo.ico
+//go:embed conector.ico
 var trayIcon []byte
 
 var messageBox = user32.NewProc("MessageBoxW")
@@ -25,7 +25,7 @@ const (
 )
 
 func showMessageResult(text string, flags uintptr) uintptr {
-	title, _ := syscall.UTF16PtrFromString("Prilo Receiver")
+	title, _ := syscall.UTF16PtrFromString("Conector-M-W Receiver")
 	body, err := syscall.UTF16PtrFromString(text)
 	if err != nil {
 		return 0
@@ -54,7 +54,7 @@ func (a *trayApp) pairingText(fresh bool) string {
 			return "Не удалось создать код сопряжения. Подробности в журнале."
 		}
 	}
-	return "Код сопряжения Prilo:\n\n" + code +
+	return "Код сопряжения Conector-M-W:\n\n" + code +
 		"\n\nНа Mac нажми «Найти ПК в сети», выбери этот ПК и вставь код. Код действует 10 минут и работает один раз.\n\nCtrl+C копирует текст этого окна."
 }
 
@@ -62,8 +62,8 @@ func (a *trayApp) pairingText(fresh bool) string {
 func runTray(app *trayApp) {
 	systray.Run(func() {
 		systray.SetIcon(trayIcon)
-		systray.SetTooltip("Prilo Receiver")
-		status := systray.AddMenuItem("Prilo Receiver работает", "")
+		systray.SetTooltip("Conector-M-W Receiver")
+		status := systray.AddMenuItem("Conector-M-W Receiver работает", "")
 		status.Disable()
 		systray.AddSeparator()
 		pair := systray.AddMenuItem("Код сопряжения…", "Показать одноразовый код для Mac")
@@ -75,7 +75,7 @@ func runTray(app *trayApp) {
 		logs := systray.AddMenuItem("Открыть журнал", "")
 		updates := systray.AddMenuItem("Проверить обновления…", "Версия "+version)
 		systray.AddSeparator()
-		quit := systray.AddMenuItem("Выйти из Prilo", "Остановить приёмник")
+		quit := systray.AddMenuItem("Выйти из Conector-M-W", "Остановить приёмник")
 
 		var updating sync.Mutex
 		update := func(quiet bool) {
@@ -87,7 +87,7 @@ func runTray(app *trayApp) {
 				app.quit()
 				if err := restartUpdated(path); err != nil {
 					log.Printf("Restart after update: %v", err)
-					showError("Обновление установлено. Запусти Prilo Receiver заново.")
+					showError("Обновление установлено. Запусти Conector-M-W Receiver заново.")
 				}
 				systray.Quit()
 			}
@@ -100,9 +100,9 @@ func runTray(app *trayApp) {
 			}
 		}()
 		if launchedAfterUpdate {
-			go showInfo("Prilo Receiver обновлён до версии " + version + ".")
+			go showInfo("Conector-M-W Receiver обновлён до версии " + version + ".")
 		} else if !launchedAtLogin {
-			go showInfo("Prilo Receiver работает в фоне. Значок в трее открывает меню.\n\n" + app.pairingText(false) +
+			go showInfo("Conector-M-W Receiver работает в фоне. Значок в трее открывает меню.\n\n" + app.pairingText(false) +
 				"\n\nЕсли Mac находит ПК, но не подключается, выбери в меню «Разрешить в брандмауэре…».")
 		}
 		go func() {
@@ -131,7 +131,7 @@ func runTray(app *trayApp) {
 						switch {
 						case err == nil:
 							log.Print("Firewall rule updated")
-							showInfo("Брандмауэр Windows разрешает Prilo входящие подключения в частных сетях. Попробуй подключиться с Mac.\n\nЕсли Mac всё ещё не подключается, проверь, что сеть Windows отмечена как «Частная»: Параметры → Сеть и Интернет → свойства сети.")
+							showInfo("Брандмауэр Windows разрешает Conector-M-W входящие подключения в частных сетях. Попробуй подключиться с Mac.\n\nЕсли Mac всё ещё не подключается, проверь, что сеть Windows отмечена как «Частная»: Параметры → Сеть и Интернет → свойства сети.")
 						case errors.Is(err, errElevationDeclined):
 						default:
 							log.Printf("Firewall: %v", err)

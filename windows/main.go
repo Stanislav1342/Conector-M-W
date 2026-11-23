@@ -29,14 +29,27 @@ type event struct {
 	Down bool
 }
 
+const (
+	bottomReturnPush int32 = 60
+	bottomPushWindow       = 250 * time.Millisecond
+)
+
+func abs32(v int32) int32 {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
 type receiver struct {
-	stopped    bool
-	mu         sync.Mutex
-	last       time.Time
-	bottomPush int32
-	enteredAt  time.Time
-	keys       map[uint16]bool
-	buttons    map[uint16]bool
+	stopped        bool
+	mu             sync.Mutex
+	last           time.Time
+	bottomPush     int32
+	lastBottomPush time.Time
+	enteredAt      time.Time
+	keys           map[uint16]bool
+	buttons        map[uint16]bool
 }
 
 func (r *receiver) release() {
@@ -58,7 +71,8 @@ func (r *receiver) apply(events []event) (bool, error) {
 	if r.stopped {
 		return false, http.ErrServerClosed
 	}
-	r.last = time.Now()
+	now := time.Now()
+	r.last = now
 	for _, e := range events {
 		if e.Kind == "release" {
 			r.release()
@@ -66,16 +80,25 @@ func (r *receiver) apply(events []event) (bool, error) {
 		}
 		if e.Kind == "enter" {
 			r.bottomPush = 0
-			r.enteredAt = time.Now()
+			r.lastBottomPush = time.Time{}
+			r.enteredAt = now
+		}
+		if e.Kind == "button" {
+			r.bottomPush = 0
 		}
 		if e.Kind == "move" {
-			if e.Y > 0 && time.Since(r.enteredAt) >= 200*time.Millisecond && atBottom() {
+			if len(r.buttons) == 0 && e.Y > 0 && abs32(e.X) <= e.Y && now.Sub(r.enteredAt) >= 200*time.Millisecond && atBottom() {
+				if !r.lastBottomPush.IsZero() && now.Sub(r.lastBottomPush) > bottomPushWindow {
+					r.bottomPush = 0
+				}
+				r.lastBottomPush = now
 				r.bottomPush += e.Y
-				if r.bottomPush >= 8 {
+				if r.bottomPush >= bottomReturnPush {
+					r.bottomPush = 0
 					r.release()
 					return true, nil
 				}
-			} else if e.Y != 0 {
+			} else if e.Y != 0 || e.X != 0 {
 				r.bottomPush = 0
 			}
 		}
@@ -171,10 +194,10 @@ func main() {
 	setDPIAware()
 	cleanupOldExe()
 	service, err := startReceiver(func(err error) {
-		fatal("Приёмник Prilo остановился", err)
+		fatal("Приёмник Conector-M-W остановился", err)
 	})
 	if err != nil {
-		fatal("Не удалось запустить Prilo Receiver", err)
+		fatal("Не удалось запустить Conector-M-W Receiver", err)
 	}
 	defer service.close()
 	runTray(&trayApp{
@@ -222,7 +245,7 @@ func (s *receiverService) close() {
 			log.Print("Windows did not accept all input releases during shutdown")
 		}
 		s.input.mu.Unlock()
-		log.Print("Prilo receiver stopped")
+		log.Print("Conector-M-W receiver stopped")
 	})
 }
 
@@ -239,15 +262,15 @@ func startReceiver(onServerError func(error)) (*receiverService, error) {
 	saved, err := loadPairing()
 	if err != nil {
 		_ = listener.Close()
-		return nil, fmt.Errorf("load Prilo keys: %w", err)
+		return nil, fmt.Errorf("load Conector-M-W keys: %w", err)
 	}
 	cert, fingerprint, err := saved.credentials()
 	if err != nil {
 		_ = listener.Close()
-		return nil, fmt.Errorf("read Prilo keys: %w", err)
+		return nil, fmt.Errorf("read Conector-M-W keys: %w", err)
 	}
 	token := saved.Token
-	log.Printf("Prilo receiver %s started (autostart=%v, updated=%v)", version, launchedAtLogin, launchedAfterUpdate)
+	log.Printf("Conector-M-W receiver %s started (autostart=%v, updated=%v)", version, launchedAtLogin, launchedAfterUpdate)
 
 	name, _ := os.Hostname()
 	if name == "" {
@@ -331,7 +354,7 @@ func startReceiver(onServerError func(error)) (*receiverService, error) {
 		details: func() string { return connectionDetails(token, fingerprint) }}
 	go func() {
 		if err := server.ServeTLS(listener, "", ""); !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("Prilo receiver stopped unexpectedly: %v", err)
+			log.Printf("Conector-M-W receiver stopped unexpectedly: %v", err)
 			service.close()
 			if onServerError != nil {
 				onServerError(err)

@@ -25,17 +25,17 @@ require.cache[transportPath] = {
   },
 };
 
-let PriloPC;
+let ConectorPC;
 require('../index.js')({
   hap: {
     Service: { Switch: class { getCharacteristic() { return { onGet() { return this; }, onSet() { return this; } }; } } },
     Characteristic: { On: 'On' },
   },
-  registerAccessory: (_name, constructor) => { PriloPC = constructor; },
+  registerAccessory: (_name, constructor) => { ConectorPC = constructor; },
 });
 
 const log = { warnings: [], warn(message) { this.warnings.push(message); } };
-const accessory = () => new PriloPC(log, { name: 'PC', host: '192.168.1.20' });
+const accessory = () => new ConectorPC(log, { name: 'PC', host: '192.168.1.20' });
 
 beforeEach(() => {
   stub.status = 204;
@@ -67,8 +67,8 @@ test('unexpected status or error is surfaced to HomeKit', async () => {
   stub.status = 401;
   await assert.rejects(accessory().isOn(), /HTTP 401/);
   stub.status = 204;
-  stub.error = fail('PRILO_PIN');
-  await assert.rejects(accessory().isOn(), { code: 'PRILO_PIN' });
+  stub.error = fail('CONECTOR_PIN');
+  await assert.rejects(accessory().isOn(), { code: 'CONECTOR_PIN' });
   assert.equal(log.warnings.length, 2);
 });
 

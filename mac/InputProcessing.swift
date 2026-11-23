@@ -22,9 +22,23 @@ struct PointerMotion {
 
 struct RemoteKeyboard {
     let commandIsControl: Bool
+    let commandSpaceSwitchesLanguage: Bool
     private var held: [Int64: UInt16] = [:]
+    private var physicalCommand: Set<Int64> = []
+    private var suppressedCommand: [Int64: UInt16] = [:]
+    private var languageSwitchActive = false
 
-    init(commandIsControl: Bool) { self.commandIsControl = commandIsControl }
+    private static let commandKeys: [Int64] = [55, 54]
+    private static let otherModifiers: Set<Int64> = [56, 60, 58, 61, 59, 62]
+
+    init(commandIsControl: Bool, commandSpaceSwitchesLanguage: Bool = true) {
+        self.commandIsControl = commandIsControl
+        self.commandSpaceSwitchesLanguage = commandSpaceSwitchesLanguage
+    }
+
+    private var otherModifierHeld: Bool {
+        held.keys.contains { Self.otherModifiers.contains($0) }
+    }
 
     mutating func events(for key: Int64, down: Bool, flagsChanged: Bool) -> [Input] {
         guard var code = scanCodes[key] else { return [] }
@@ -35,14 +49,66 @@ struct RemoteKeyboard {
         if key == 57 && flagsChanged {
             return [Input(kind: "key", code: code, down: true), Input(kind: "key", code: code)]
         }
+        if flagsChanged && (key == 55 || key == 54) {
+            if down {
+                physicalCommand.insert(key)
+            } else {
+                physicalCommand.remove(key)
+                if suppressedCommand.removeValue(forKey: key) != nil { return [] }
+            }
+        }
+        if key == 49 && !flagsChanged {
+            if down {
+                if languageSwitchActive { return [] }
+                if commandSpaceSwitchesLanguage, !physicalCommand.isEmpty, !otherModifierHeld, held[49] == nil {
+                    languageSwitchActive = true
+                    var releasedCmdUps: [Input] = []
+                    for cmdKey in Self.commandKeys {
+                        if let cmdCode = held.removeValue(forKey: cmdKey) {
+                            suppressedCommand[cmdKey] = cmdCode
+                            if !held.values.contains(cmdCode) {
+                                releasedCmdUps.append(Input(kind: "key", code: cmdCode, down: false))
+                            }
+                        }
+                    }
+                    var sequence: [Input] = []
+                    if commandIsControl {
+                        sequence.append(contentsOf: releasedCmdUps)
+                        sequence.append(Input(kind: "key", code: 0x2a, down: true))
+                        sequence.append(Input(kind: "key", code: 0x38, down: true))
+                    } else {
+                        // Hold Shift before releasing Win so Windows does not open the Start menu.
+                        sequence.append(Input(kind: "key", code: 0x2a, down: true))
+                        sequence.append(contentsOf: releasedCmdUps)
+                        sequence.append(Input(kind: "key", code: 0x38, down: true))
+                    }
+                    return sequence
+                }
+            } else if languageSwitchActive {
+                languageSwitchActive = false
+                return [Input(kind: "key", code: 0x38, down: false), Input(kind: "key", code: 0x2a, down: false)]
+            }
+        }
+        var prefix: [Input] = []
+        if down, !languageSwitchActive, !suppressedCommand.isEmpty, !(flagsChanged && (key == 55 || key == 54)) {
+            for cmdKey in Self.commandKeys {
+                if let cmdCode = suppressedCommand.removeValue(forKey: cmdKey) {
+                    let alreadyHeld = held.values.contains(cmdCode)
+                    held[cmdKey] = cmdCode
+                    if !alreadyHeld {
+                        prefix.append(Input(kind: "key", code: cmdCode, down: true))
+                    }
+                }
+            }
+        }
         if down {
             let alreadyHeld = held.values.contains(code)
             held[key] = code
             // Only ordinary key presses repeat. Multiple physical modifiers can share one scan code.
-            if alreadyHeld && flagsChanged { return [] }
+            if alreadyHeld && flagsChanged { return prefix }
         } else {
-            guard held.removeValue(forKey: key) != nil, !held.values.contains(code) else { return [] }
+            guard held.removeValue(forKey: key) != nil, !held.values.contains(code) else { return prefix }
         }
-        return [Input(kind: "key", code: code, down: down)]
+        return prefix + [Input(kind: "key", code: code, down: down)]
     }
 }

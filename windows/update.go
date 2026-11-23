@@ -80,9 +80,9 @@ func newerVersion(current, candidate string) bool {
 // receiverAsset is the release file built for this CPU.
 func receiverAsset(goarch string) string {
 	if goarch == "arm64" {
-		return "PriloReceiver-arm64.exe"
+		return "ConectorMWReceiver-arm64.exe"
 	}
-	return "PriloReceiver.exe"
+	return "ConectorMWReceiver.exe"
 }
 
 func (r release) asset(name string) (releaseAsset, bool) {
@@ -107,7 +107,7 @@ func latestRelease(apiBase, repo string) (release, error) {
 		return release{}, err
 	}
 	request.Header.Set("Accept", "application/vnd.github+json")
-	request.Header.Set("User-Agent", "PriloReceiver/"+version)
+	request.Header.Set("User-Agent", "ConectorMWReceiver/"+version)
 	response, err := updateClient.Do(request)
 	if err != nil {
 		return release{}, err
@@ -139,7 +139,7 @@ func download(asset releaseAsset, path string) error {
 	if err != nil {
 		return err
 	}
-	request.Header.Set("User-Agent", "PriloReceiver/"+version)
+	request.Header.Set("User-Agent", "ConectorMWReceiver/"+version)
 	response, err := updateClient.Do(request)
 	if err != nil {
 		return err

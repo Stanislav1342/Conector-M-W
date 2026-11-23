@@ -2,15 +2,16 @@
 set -euo pipefail
 umask 077
 
-bundle_id="com.artlee12.prilo"
-signing_dir="${PRILO_SIGNING_DIR:-$HOME/Library/Application Support/Prilo/Signing}"
-keychain="$signing_dir/prilo-signing.keychain-db"
+base="$(cd "$(dirname "$0")/.." && pwd)"
+bundle_id="com.stanislav1342.conector-m-w"
+signing_dir="${CONECTOR_SIGNING_DIR:-$base/.local/signing}"
+keychain="$signing_dir/conector-signing.keychain-db"
 password_file="$signing_dir/keychain-password"
 certificate="$signing_dir/certificate.pem"
 
 require_local_identity() {
     if [[ ! -f "$keychain" || ! -f "$password_file" || ! -f "$certificate" ]]; then
-        printf '%s\n' "Prilo signing identity is missing or incomplete in: $signing_dir" >&2
+        printf '%s\n' "Conector-M-W signing identity is missing or incomplete in: $signing_dir" >&2
         printf '%s\n' "Run scripts/sign-mac.sh init once for a new identity. Restore the existing files if this Mac was already set up." >&2
         exit 1
     fi
@@ -23,13 +24,13 @@ local_fingerprint() {
 initialize() {
     if [[ -e "$signing_dir" || -L "$signing_dir" ]]; then
         require_local_identity
-        printf '%s\n' "Prilo local signing identity already exists."
+        printf '%s\n' "Conector-M-W local signing identity already exists."
         return
     fi
     local parent password
     parent="$(dirname "$signing_dir")"
     mkdir -p "$parent"
-    stage="$(mktemp -d "$parent/.prilo-signing.XXXXXX")"
+    stage="$(mktemp -d "$parent/.conector-signing.XXXXXX")"
     trap 'rm -rf "$stage"' EXIT
     password="$(/usr/bin/openssl rand -hex 32)"
     printf '%s' "$password" > "$stage/keychain-password"
@@ -39,7 +40,7 @@ prompt = no
 distinguished_name = dn
 x509_extensions = extensions
 [dn]
-CN = Prilo Local Signing
+CN = Conector-M-W Local Signing
 [extensions]
 basicConstraints = critical,CA:FALSE
 keyUsage = critical,digitalSignature
@@ -53,7 +54,7 @@ CONFIG
 
     # security create-keychain can add its destination to the user's search list.
     # Preserve that list and use this keychain only by its explicit path.
-    python3 - "$stage/prilo-signing.keychain-db" "$stage/keychain-password" <<'PYTHON'
+    python3 - "$stage/conector-signing.keychain-db" "$stage/keychain-password" <<'PYTHON'
 import pathlib
 import shlex
 import subprocess
@@ -70,12 +71,12 @@ finally:
     if current != previous:
         subprocess.run(command + ["-s", *previous], check=True)
 PYTHON
-    /usr/bin/security unlock-keychain -p "$password" "$stage/prilo-signing.keychain-db"
-    /usr/bin/security import "$stage/identity.p12" -k "$stage/prilo-signing.keychain-db" \
+    /usr/bin/security unlock-keychain -p "$password" "$stage/conector-signing.keychain-db"
+    /usr/bin/security import "$stage/identity.p12" -k "$stage/conector-signing.keychain-db" \
         -P "$password" -T /usr/bin/codesign
     /usr/bin/security set-key-partition-list -S apple-tool:,apple: -s -k "$password" \
-        "$stage/prilo-signing.keychain-db" >/dev/null
-    /usr/bin/security lock-keychain "$stage/prilo-signing.keychain-db"
+        "$stage/conector-signing.keychain-db" >/dev/null
+    /usr/bin/security lock-keychain "$stage/conector-signing.keychain-db"
     rm -f "$stage/private.pem" "$stage/identity.p12" "$stage/cert.conf"
     # Refuse to overwrite the identity if another initializer won the race.
     python3 - "$stage" "$signing_dir" <<'PYTHON'
@@ -84,7 +85,7 @@ import sys
 os.rename(sys.argv[1], sys.argv[2])
 PYTHON
     trap - EXIT
-    printf '%s\n' "Created Prilo local signing identity at: $signing_dir"
+    printf '%s\n' "Created Conector-M-W local signing identity at: $signing_dir"
 }
 
 case "${1:-}" in
@@ -93,7 +94,7 @@ case "${1:-}" in
         ;;
     sign)
         require_local_identity
-        app="${2:?Pass a Prilo.app path}"
+        app="${2:?Pass a Conector-M-W.app path}"
         fingerprint="$(local_fingerprint)"
         /usr/bin/security unlock-keychain -p "$(cat "$password_file")" "$keychain"
         trap '/usr/bin/security lock-keychain "$keychain" >/dev/null 2>&1 || true' EXIT
@@ -103,13 +104,13 @@ case "${1:-}" in
         ;;
     verify)
         require_local_identity
-        app="${2:?Pass a Prilo.app path}"
+        app="${2:?Pass a Conector-M-W.app path}"
         fingerprint="$(local_fingerprint)"
         /usr/bin/codesign --verify --strict \
             -R "=identifier \"$bundle_id\" and certificate leaf = H\"$fingerprint\"" "$app"
         ;;
     *)
-        printf '%s\n' 'Usage: sign-mac.sh init | sign Prilo.app | verify Prilo.app' >&2
+        printf '%s\n' 'Usage: sign-mac.sh init | sign Conector-M-W.app | verify Conector-M-W.app' >&2
         exit 2
         ;;
 esac

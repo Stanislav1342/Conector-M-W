@@ -1,4 +1,4 @@
-"""Python host for the native Prilo Windows receiver."""
+"""Python host for the native Conector-M-W Windows receiver."""
 
 import ctypes
 import json
@@ -15,17 +15,17 @@ _active_receiver = None
 def _native():
     global _library
     if sys.platform != "win32":
-        raise OSError("Prilo Receiver runs on Windows.")
+        raise OSError("Conector-M-W Receiver runs on Windows.")
     if _library is None:
         library = ctypes.CDLL(str(Path(__file__).with_name("prilo_receiver.dll")))
-        for name in ("PriloStart", "PriloNewPairingCode", "PriloConnectionDetails"):
+        for name in ("ConectorStart", "ConectorNewPairingCode", "ConectorConnectionDetails"):
             function = getattr(library, name)
             function.argtypes = []
             function.restype = ctypes.c_void_p
-        library.PriloStop.argtypes = []
-        library.PriloStop.restype = None
-        library.PriloFree.argtypes = [ctypes.c_void_p]
-        library.PriloFree.restype = None
+        library.ConectorStop.argtypes = []
+        library.ConectorStop.restype = None
+        library.ConectorFree.argtypes = [ctypes.c_void_p]
+        library.ConectorFree.restype = None
         _library = library
     return _library
 
@@ -33,11 +33,11 @@ def _native():
 def _read(library, name, field="code"):
     pointer = getattr(library, name)()
     if not pointer:
-        raise RuntimeError("Prilo Receiver returned no result.")
+        raise RuntimeError("Conector-M-W Receiver returned no result.")
     try:
         result = json.loads(ctypes.string_at(pointer))
     finally:
-        library.PriloFree(pointer)
+        library.ConectorFree(pointer)
     if "error" in result:
         raise RuntimeError(result["error"])
     return result[field]
@@ -55,9 +55,9 @@ class Receiver:
         global _active_receiver
         with _lock:
             if _active_receiver is not None:
-                raise RuntimeError("A Prilo Receiver is already running in this Python process.")
+                raise RuntimeError("A Conector-M-W Receiver is already running in this Python process.")
             library = _native()
-            code = _read(library, "PriloStart")
+            code = _read(library, "ConectorStart")
             self._running = True
             _active_receiver = self
             self.pairing_code = code
@@ -66,22 +66,22 @@ class Receiver:
     def new_pairing_code(self):
         with _lock:
             if not self._running:
-                raise RuntimeError("Prilo Receiver is not running.")
-            self.pairing_code = _read(_native(), "PriloNewPairingCode")
+                raise RuntimeError("Conector-M-W Receiver is not running.")
+            self.pairing_code = _read(_native(), "ConectorNewPairingCode")
             return self.pairing_code
 
     def connection_details(self):
         """Return local setup details, including the private access code."""
         with _lock:
             if not self._running:
-                raise RuntimeError("Prilo Receiver is not running.")
-            return _read(_native(), "PriloConnectionDetails", "details")
+                raise RuntimeError("Conector-M-W Receiver is not running.")
+            return _read(_native(), "ConectorConnectionDetails", "details")
 
     def close(self):
         global _active_receiver
         with _lock:
             if self._running:
-                _native().PriloStop()
+                _native().ConectorStop()
                 self._running = False
                 _active_receiver = None
                 self.pairing_code = None

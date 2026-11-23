@@ -29,7 +29,7 @@ struct PowerAccess {
 
     func homebridgeConfig(wake: WakeTarget) throws -> String {
         let data = try JSONSerialization.data(withJSONObject: [
-            "accessory": "PriloPC",
+            "accessory": "ConectorPC",
             "name": profile.name,
             "uuid_base": profile.id.uuidString,
             "host": profile.host,
@@ -48,11 +48,11 @@ extension Response {
         guard case .failure(let code) = self else { return nil }
         switch code {
         case .timedOut:
-            return "ПК не ответил на порту 43821. Если Prilo находит ПК в сети, подключение, скорее всего, блокирует брандмауэр Windows: в меню Prilo в трее выбери «Разрешить в брандмауэре…». Иначе проверь, что ПК включён и в той же сети."
+            return "ПК не ответил на порту 43821. Если Conector-M-W находит ПК в сети, подключение, скорее всего, блокирует брандмауэр Windows: в меню Conector-M-W в трее выбери «Разрешить в брандмауэре…». Иначе проверь, что ПК включён и в той же сети."
         case .cannotConnectToHost:
-            return "ПК в сети, но приёмник не принимает подключения. Запусти Prilo Receiver на Windows."
+            return "ПК в сети, но приёмник не принимает подключения. Запусти Conector-M-W Receiver на Windows."
         case .notConnectedToInternet, .networkConnectionLost, .cannotFindHost, .dnsLookupFailed:
-            return "Нет связи с ПК. Проверь, что Mac и ПК в одной сети и у Prilo есть доступ к локальной сети в настройках macOS."
+            return "Нет связи с ПК. Проверь, что Mac и ПК в одной сети и у Conector-M-W есть доступ к локальной сети в настройках macOS."
         default:
             return nil
         }

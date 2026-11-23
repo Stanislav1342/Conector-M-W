@@ -2,9 +2,9 @@ import AppKit
 import Security
 import SwiftUI
 
-/// Checks GitHub Releases for a newer Prilo and installs it in place.
+/// Checks GitHub Releases for a newer Conector-M-W and installs it in place.
 /// The new bundle must satisfy the running app's designated requirement, so only
-/// builds signed with the same Prilo certificate can replace this copy.
+/// builds signed with the same Conector-M-W certificate can replace this copy.
 final class UpdateModel: ObservableObject {
     enum Phase: Equatable {
         case idle
@@ -26,7 +26,7 @@ final class UpdateModel: ObservableObject {
     private var timer: Timer?
 
     let current = ReleaseVersion(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "") ?? ReleaseVersion("0")!
-    let repository = (Bundle.main.infoDictionary?["PriloUpdateRepository"] as? String) ?? ""
+    let repository = (Bundle.main.infoDictionary?["ConectorUpdateRepository"] as? String) ?? ""
 
     init() {
         automatic = UserDefaults.standard.object(forKey: Self.automaticKey) as? Bool ?? true
@@ -61,7 +61,7 @@ final class UpdateModel: ObservableObject {
         set(.checking)
         var request = URLRequest(url: url, timeoutInterval: 20)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        request.setValue("Prilo/\(current)", forHTTPHeaderField: "User-Agent")
+        request.setValue("Conector-M-W/\(current)", forHTTPHeaderField: "User-Agent")
         URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
             let info = data.flatMap(ReleaseInfo.parse)
@@ -86,7 +86,7 @@ final class UpdateModel: ObservableObject {
         }.resume()
     }
 
-    /// Downloads, verifies and swaps in the new bundle, then relaunches Prilo.
+    /// Downloads, verifies and swaps in the new bundle, then relaunches Conector-M-W.
     func install() {
         guard let info = available else { return }
         set(.installing)
@@ -141,7 +141,7 @@ final class UpdateModel: ObservableObject {
         unzip.arguments = ["-x", "-k", archive.path, folder.path]
         try unzip.run()
         unzip.waitUntilExit()
-        let candidate = folder.appendingPathComponent("Prilo.app")
+        let candidate = folder.appendingPathComponent("Conector-M-W.app")
         guard unzip.terminationStatus == 0, FileManager.default.fileExists(atPath: candidate.path) else {
             throw UpdateError("Архив обновления повреждён.")
         }
@@ -171,7 +171,7 @@ final class UpdateModel: ObservableObject {
         let result = SecStaticCodeCheckValidity(candidate, flags, requirement)
         guard result == errSecSuccess else {
             Diagnostics.shared.record("update signature rejected status=\(result)")
-            throw UpdateError("Подпись обновления не совпадает с подписью Prilo. Обновление отклонено.")
+            throw UpdateError("Подпись обновления не совпадает с подписью Conector-M-W. Обновление отклонено.")
         }
     }
 
@@ -184,9 +184,9 @@ final class UpdateModel: ObservableObject {
         let relaunch = Process()
         relaunch.executableURL = URL(fileURLWithPath: "/bin/sh")
         relaunch.arguments = ["-c", "while /bin/kill -0 \"$1\" 2>/dev/null; do /bin/sleep 0.2; done; /usr/bin/open \"$2\"",
-                              "prilo-relaunch", String(ProcessInfo.processInfo.processIdentifier), installed.path]
+                              "conector-relaunch", String(ProcessInfo.processInfo.processIdentifier), installed.path]
         try relaunch.run()
-        (NSApp.delegate as? Prilo)?.quitForUpdate()
+        (NSApp.delegate as? ConectorApp)?.quitForUpdate()
     }
 }
 

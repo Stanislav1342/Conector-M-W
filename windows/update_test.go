@@ -31,7 +31,7 @@ func TestNewerVersion(t *testing.T) {
 }
 
 func TestReceiverAsset(t *testing.T) {
-	if receiverAsset("arm64") != "PriloReceiver-arm64.exe" || receiverAsset("amd64") != "PriloReceiver.exe" {
+	if receiverAsset("arm64") != "ConectorMWReceiver-arm64.exe" || receiverAsset("amd64") != "ConectorMWReceiver.exe" {
 		t.Fatal("wrong asset names")
 	}
 }
@@ -39,10 +39,10 @@ func TestReceiverAsset(t *testing.T) {
 func TestLatestRelease(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/repos/o/prilo/releases/latest":
-			w.Write([]byte(`{"tag_name":"v0.9.0","html_url":"https://github.com/o/prilo/releases/tag/v0.9.0",
-				"assets":[{"name":"PriloReceiver.exe","browser_download_url":"https://example.com/a.exe","digest":"sha256:ab"},
-				          {"name":"PriloReceiver-arm64.exe","browser_download_url":"http://example.com/b.exe"}]}`))
+		case "/repos/o/conector/releases/latest":
+			w.Write([]byte(`{"tag_name":"v0.9.0","html_url":"https://github.com/o/conector/releases/tag/v0.9.0",
+				"assets":[{"name":"ConectorMWReceiver.exe","browser_download_url":"https://example.com/a.exe","digest":"sha256:ab"},
+				          {"name":"ConectorMWReceiver-arm64.exe","browser_download_url":"http://example.com/b.exe"}]}`))
 		case "/repos/o/pre/releases/latest":
 			w.Write([]byte(`{"tag_name":"v1.0.0","prerelease":true}`))
 		default:
@@ -51,14 +51,14 @@ func TestLatestRelease(t *testing.T) {
 	}))
 	defer server.Close()
 
-	latest, err := latestRelease(server.URL, "o/prilo")
+	latest, err := latestRelease(server.URL, "o/conector")
 	if err != nil || latest.Tag != "v0.9.0" {
 		t.Fatalf("latest = %+v, %v", latest, err)
 	}
-	if asset, ok := latest.asset("PriloReceiver.exe"); !ok || asset.Digest != "sha256:ab" {
+	if asset, ok := latest.asset("ConectorMWReceiver.exe"); !ok || asset.Digest != "sha256:ab" {
 		t.Fatalf("x64 asset = %+v, %v", asset, ok)
 	}
-	if _, ok := latest.asset("PriloReceiver-arm64.exe"); ok {
+	if _, ok := latest.asset("ConectorMWReceiver-arm64.exe"); ok {
 		t.Fatal("plain http asset must be ignored")
 	}
 	if latest, err := latestRelease(server.URL, "o/pre"); err != nil || latest.Tag != "" {
@@ -77,9 +77,9 @@ func TestDownloadChecksDigest(t *testing.T) {
 	sum := sha256.Sum256(body)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(body) }))
 	defer server.Close()
-	path := filepath.Join(t.TempDir(), "PriloReceiver.exe.new")
+	path := filepath.Join(t.TempDir(), "ConectorMWReceiver.exe.new")
 
-	good := releaseAsset{Name: "PriloReceiver.exe", URL: server.URL, Digest: "sha256:" + hex.EncodeToString(sum[:])}
+	good := releaseAsset{Name: "ConectorMWReceiver.exe", URL: server.URL, Digest: "sha256:" + hex.EncodeToString(sum[:])}
 	if err := download(good, path); err != nil {
 		t.Fatalf("download: %v", err)
 	}

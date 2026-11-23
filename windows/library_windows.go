@@ -1,4 +1,4 @@
-//go:build prilo_library
+//go:build conector_library
 
 package main
 
@@ -34,8 +34,8 @@ func libraryResult(code string, err string) *C.char {
 	return (libraryResponse{Code: code, Error: err}).encode()
 }
 
-//export PriloStart
-func PriloStart() *C.char {
+//export ConectorStart
+func ConectorStart() *C.char {
 	hosted.Lock()
 	defer hosted.Unlock()
 	if hosted.service != nil {
@@ -44,7 +44,7 @@ func PriloStart() *C.char {
 			hosted.service.close()
 			hosted.service = nil
 		default:
-			return libraryResult("", "Prilo Receiver is already running in this process.")
+			return libraryResult("", "Conector-M-W Receiver is already running in this process.")
 		}
 	}
 	service, err := startReceiver(nil)
@@ -54,22 +54,22 @@ func PriloStart() *C.char {
 	code, ok := service.invite.current(time.Now())
 	if !ok {
 		service.close()
-		return libraryResult("", "Could not create the Prilo pairing code.")
+		return libraryResult("", "Could not create the Conector-M-W pairing code.")
 	}
 	hosted.service = service
 	return libraryResult(code, "")
 }
 
-//export PriloNewPairingCode
-func PriloNewPairingCode() *C.char {
+//export ConectorNewPairingCode
+func ConectorNewPairingCode() *C.char {
 	hosted.Lock()
 	defer hosted.Unlock()
 	if hosted.service == nil {
-		return libraryResult("", "Prilo Receiver is not running.")
+		return libraryResult("", "Conector-M-W Receiver is not running.")
 	}
 	select {
 	case <-hosted.service.done:
-		return libraryResult("", "Prilo Receiver has stopped.")
+		return libraryResult("", "Conector-M-W Receiver has stopped.")
 	default:
 	}
 	code, err := hosted.service.invite.issue()
@@ -79,23 +79,23 @@ func PriloNewPairingCode() *C.char {
 	return libraryResult(code, "")
 }
 
-//export PriloConnectionDetails
-func PriloConnectionDetails() *C.char {
+//export ConectorConnectionDetails
+func ConectorConnectionDetails() *C.char {
 	hosted.Lock()
 	defer hosted.Unlock()
 	if hosted.service == nil {
-		return libraryResult("", "Prilo Receiver is not running.")
+		return libraryResult("", "Conector-M-W Receiver is not running.")
 	}
 	select {
 	case <-hosted.service.done:
-		return libraryResult("", "Prilo Receiver has stopped.")
+		return libraryResult("", "Conector-M-W Receiver has stopped.")
 	default:
 		return (libraryResponse{Details: hosted.service.details()}).encode()
 	}
 }
 
-//export PriloStop
-func PriloStop() {
+//export ConectorStop
+func ConectorStop() {
 	hosted.Lock()
 	defer hosted.Unlock()
 	if hosted.service != nil {
@@ -104,7 +104,7 @@ func PriloStop() {
 	}
 }
 
-//export PriloFree
-func PriloFree(pointer unsafe.Pointer) {
+//export ConectorFree
+func ConectorFree(pointer unsafe.Pointer) {
 	C.free(pointer)
 }

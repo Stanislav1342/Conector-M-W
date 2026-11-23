@@ -5,9 +5,15 @@ struct InputFrame: Encodable {
     let events: [Input]
 }
 
+struct ClipboardFrame: Encodable {
+    let type = "clipboard"
+    let clipboard: String
+}
+
 struct ChannelMessage: Decodable {
     let type: String
     let capture: UInt64?
+    let text: String?
 }
 
 final class InputChannel {
@@ -33,7 +39,7 @@ final class InputChannel {
         var request = URLRequest(url: endpoint)
         request.setValue("Bearer \(connection.code)", forHTTPHeaderField: "Authorization")
         task = session.webSocketTask(with: request)
-        task.maximumMessageSize = 4096
+        task.maximumMessageSize = 2 * 1024 * 1024
     }
 
     func start() {
@@ -88,6 +94,18 @@ final class InputChannel {
                     self.fail(.failure((error as? URLError)?.code ?? .networkConnectionLost))
                 } else {
                     completion()
+                }
+            }
+        }
+    }
+
+    func sendClipboard(_ text: String) {
+        guard !closed, let payload = try? JSONEncoder().encode(ClipboardFrame(clipboard: text)) else { return }
+        task.send(.data(payload)) { [weak self] error in
+            DispatchQueue.main.async {
+                guard let self, !self.closed else { return }
+                if let error {
+                    self.fail(.failure((error as? URLError)?.code ?? .networkConnectionLost))
                 }
             }
         }

@@ -18,7 +18,7 @@ const valid = {
   powerToken: 'F8'.repeat(32),
 };
 
-test('parse normalises a config exported by Prilo', () => {
+test('parse normalises a config exported by Conector-M-W', () => {
   const connection = parse(valid);
   assert.equal(connection.host, '192.168.1.20');
   assert.deepEqual([...connection.mac], [0xa8, 0x5e, 0x45, 0x01, 0x02, 0x03]);
@@ -53,13 +53,13 @@ test('magic packet is 6 x FF then the MAC 16 times', () => {
 });
 
 function selfSignedCertificate(t) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'prilo-hb-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'conector-hb-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const key = path.join(dir, 'key.pem');
   const cert = path.join(dir, 'cert.pem');
   try {
     execFileSync('openssl', ['req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1',
-      '-nodes', '-days', '1', '-subj', '/CN=prilo-test', '-keyout', key, '-out', cert], { stdio: 'ignore' });
+      '-nodes', '-days', '1', '-subj', '/CN=conector-test', '-keyout', key, '-out', cert], { stdio: 'ignore' });
   } catch {
     return null;
   }
@@ -111,6 +111,6 @@ test('request never sends the token to a certificate that does not match', async
   if (!seen) return t.skip('port 43821 is in use (is a receiver running?)');
   const connection = parse({ ...valid, host: '127.0.0.1', fingerprint: 'ab'.repeat(32) });
 
-  await assert.rejects(request(connection, true), { code: 'PRILO_PIN' });
+  await assert.rejects(request(connection, true), { code: 'CONECTOR_PIN' });
   assert.deepEqual(seen, [], 'the impostor must not receive any HTTP request');
 });

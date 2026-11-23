@@ -3,7 +3,7 @@
 const { parse, request, wake, offlineCodes } = require('./transport');
 
 module.exports = api => {
-  class PriloPC {
+  class ConectorPC {
     constructor(log, config) {
       this.log = log;
       this.connection = parse(config);
@@ -21,7 +21,7 @@ module.exports = api => {
     async isOn() {
       try {
         const status = await request(this.connection, false);
-        if (status !== 204) throw new Error(`Prilo power status rejected (HTTP ${status})`);
+        if (status !== 204) throw new Error(`Conector-M-W power status rejected (HTTP ${status})`);
         this.wakingUntil = 0;
         return true;
       } catch (error) {
@@ -38,7 +38,7 @@ module.exports = api => {
           this.wakingUntil = Date.now() + 45000;
         } else {
           const status = await request(this.connection, true);
-          if (status !== 202) throw new Error(`Prilo shutdown rejected (HTTP ${status})`);
+          if (status !== 202) throw new Error(`Conector-M-W shutdown rejected (HTTP ${status})`);
           this.wakingUntil = 0;
         }
       } catch (error) {
@@ -48,5 +48,5 @@ module.exports = api => {
     }
   }
 
-  api.registerAccessory('PriloPC', PriloPC);
+  api.registerAccessory('ConectorPC', ConectorPC);
 };

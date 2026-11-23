@@ -137,7 +137,7 @@ func TestStreamReportsReturn(t *testing.T) {
 	h.r.enteredAt = time.Now().Add(-time.Second)
 	h.r.mu.Unlock()
 	setBottom(true)
-	h.send(ws, inputFrame{Capture: 3, Events: []event{{Kind: "move", Y: 20}}})
+	h.send(ws, inputFrame{Capture: 3, Events: []event{{Kind: "move", Y: 60}}})
 	if got := h.read(ws); got.Type != "returned" || got.Capture != 3 {
 		t.Fatalf("got %+v, want returned for capture 3", got)
 	}
@@ -206,4 +206,43 @@ func TestStoppingHostedStreamClosesSocketAndReleasesInput(t *testing.T) {
 		t.Fatal("hosted stream did not close")
 	}
 	waitFor(t, "released key", func() bool { return !h.held(30) })
+}
+
+func TestStreamClipboardMacToWindows(t *testing.T) {
+	h := newStream(t)
+	ws := h.connect()
+	h.send(ws, inputFrame{Type: "clipboard", Clipboard: "line1\nline2"})
+	waitFor(t, "clipboard written on Windows", func() bool {
+		return fakeClipboard() == "line1\r\nline2"
+	})
+	// Applying remote clipboard must not echo back to Mac.
+	_ = ws.SetReadDeadline(time.Now().Add(350 * time.Millisecond))
+	var extra streamMessage
+	if err := ws.ReadJSON(&extra); err == nil {
+		t.Fatalf("unexpected echo message: %+v", extra)
+	}
+}
+
+func TestStreamClipboardWindowsToMac(t *testing.T) {
+	h := newStream(t)
+	ws := h.connect()
+	setFakeClipboard("hello\r\nworld")
+	got := h.read(ws)
+	if got.Type != "clipboard" || got.Text != "hello\nworld" {
+		t.Fatalf("got %+v, want clipboard with normalized LF text", got)
+	}
+}
+
+func TestStreamClipboardIgnoresOversizedPayload(t *testing.T) {
+	h := newStream(t)
+	ws := h.connect()
+	oversized := strings.Repeat("a", maxClipboardBytes+1)
+	h.send(ws, inputFrame{Type: "clipboard", Clipboard: oversized})
+	h.send(ws, inputFrame{Capture: 1, Events: []event{{Kind: "enter"}}})
+	if got := h.read(ws); got.Type != "entered" {
+		t.Fatalf("got %+v, want entered", got)
+	}
+	if fakeClipboard() != "" {
+		t.Fatal("oversized clipboard must be ignored")
+	}
 }

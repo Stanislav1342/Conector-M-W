@@ -1,4 +1,4 @@
-module prilo-receiver
+module conector-receiver
 
 go 1.24.0
 
