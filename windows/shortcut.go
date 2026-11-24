@@ -43,9 +43,7 @@ var shortcutCombos = map[string][]shortcutKey{
 		{vk: 0x25, scan: 0x4B, extended: true}, // Left
 	},
 	"snip": {
-		{vk: 0x5B, scan: 0x5B, extended: true}, // LWin
-		{vk: 0xA0, scan: 0x2A},                 // LShift
-		{vk: 0x53, scan: 0x1F},                 // S
+		{vk: 0x2C, scan: 0x37, extended: true}, // Print Screen (VK_SNAPSHOT)
 	},
 }
 

@@ -233,32 +233,17 @@ func inputStreamWithBridge(ctx context.Context, r *receiver, control *sync.Mutex
 				continue
 			case "shortcut":
 				if capture != 0 && frame.Capture == capture && validShortcutAction(frame.Action) {
-					if frame.Action == "snip" {
-						r.mu.Lock()
-						if !r.stopped {
-							r.last = time.Now()
+					r.mu.Lock()
+					if !r.stopped {
+						r.last = time.Now()
+						if frame.Action == "snip" {
 							r.release()
 						}
-						r.mu.Unlock()
-						startSnipOverlay(func(pngBytes []byte) {
-							if err := clip.applyRemoteImage(pngBytes); err != nil {
-								log.Printf("snip clipboard apply: %v", err)
-							}
-							_ = write(streamMessage{
-								Type:  "clipboardImage",
-								Image: base64.StdEncoding.EncodeToString(pngBytes),
-							})
-						})
-					} else {
-						r.mu.Lock()
-						if !r.stopped {
-							r.last = time.Now()
-							if err := sendShortcut(frame.Action); err != nil {
-								log.Printf("stream shortcut %s: %v", frame.Action, err)
-							}
+						if err := sendShortcut(frame.Action); err != nil {
+							log.Printf("stream shortcut %s: %v", frame.Action, err)
 						}
-						r.mu.Unlock()
 					}
+					r.mu.Unlock()
 				}
 				continue
 			}

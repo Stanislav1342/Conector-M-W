@@ -1,9 +1,31 @@
 import AppKit
 
+private let legacyFilenamesPasteboardType = NSPasteboard.PasteboardType("NSFilenamesPboardType")
+
+func extractDraggedFileURLs(from pb: NSPasteboard) -> [URL] {
+    if let urls = pb.readObjects(forClasses: [NSURL.self],
+                                 options: [.urlReadingFileURLsOnly: true]) as? [URL] {
+        let resolved = urls.compactMap { ($0 as NSURL).filePathURL ?? ($0.isFileURL ? $0 : nil) }
+        if !resolved.isEmpty {
+            return resolved
+        }
+    }
+    if let paths = pb.propertyList(forType: legacyFilenamesPasteboardType) as? [String] {
+        return paths.map { URL(fileURLWithPath: $0) }
+    }
+    return []
+}
+
+func dragPasteboardHasFiles() -> Bool {
+    NSPasteboard(name: .drag).availableType(from: [.fileURL, legacyFilenamesPasteboardType]) != nil
+}
+
 final class FileDropBar {
     private var panel: NSPanel?
     private var dropView: DropTargetView?
     private var label: NSTextField?
+    private var materialView: NSVisualEffectView?
+    private var glassCornerUpdater: ((CGFloat) -> Void)?
     private var dismissWork: DispatchWorkItem?
     private(set) var isShowingDropZone = false
 
@@ -13,7 +35,7 @@ final class FileDropBar {
         if let panel, let dropView, let label {
             return (panel, dropView, label)
         }
-        let frame = NSRect(x: 0, y: 0, width: 420, height: 60)
+        let frame = NSRect(x: 0, y: 0, width: 250, height: 108)
         let next = NSPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel],
                            backing: .buffered, defer: false)
         next.isOpaque = false
@@ -52,21 +74,25 @@ final class FileDropBar {
 
         if #available(macOS 26.0, *) {
             let glass = NSGlassEffectView(frame: frame)
-            glass.cornerRadius = frame.height / 2
+            glass.cornerRadius = 22
             glass.contentView = target
             next.contentView = glass
             next.hasShadow = false
+            glassCornerUpdater = { [weak glass] radius in
+                glass?.cornerRadius = radius
+            }
         } else {
             let material = NSVisualEffectView(frame: frame)
             material.material = .hudWindow
             material.blendingMode = .behindWindow
             material.state = .active
             material.wantsLayer = true
-            material.layer?.cornerRadius = frame.height / 2
+            material.layer?.cornerRadius = 22
             material.layer?.masksToBounds = true
             target.autoresizingMask = [.width, .height]
             material.addSubview(target)
             next.contentView = material
+            materialView = material
         }
 
         self.panel = next
@@ -75,18 +101,30 @@ final class FileDropBar {
         return (next, target, field)
     }
 
-    func showDropZone(near x: CGFloat, on screen: NSScreen, destinationLabel: String) {
+    private func applyCornerRadius(_ radius: CGFloat, target: DropTargetView) {
+        target.layer?.cornerRadius = radius
+        glassCornerUpdater?(radius)
+        materialView?.layer?.cornerRadius = radius
+    }
+
+    func showDropZone(nearQuartzY quartzY: CGFloat, on screen: NSScreen) {
         let (panel, target, field) = ensurePanel()
         dismissWork?.cancel()
         isShowingDropZone = true
         panel.ignoresMouseEvents = false
-        field.stringValue = "Отпустите для отправки на Windows (\(destinationLabel))"
+        target.onClick = nil
+        field.maximumNumberOfLines = 2
+        field.lineBreakMode = .byWordWrapping
+        field.stringValue = "Отпустите файл\nдля Windows → Загрузки"
         target.setHighlighted(false)
-        let width: CGFloat = 420
-        let height: CGFloat = 60
+        applyCornerRadius(22, target: target)
+        let width: CGFloat = 250
+        let height: CGFloat = 108
         let vf = screen.visibleFrame
-        let posX = max(vf.minX + 12, min(x - width / 2, vf.maxX - width - 12))
-        let posY = screen.frame.maxY - height - 2
+        let primaryMaxY = NSScreen.screens.first?.frame.maxY ?? screen.frame.maxY
+        let appKitY = primaryMaxY - quartzY
+        let posX = screen.frame.maxX - width - 6
+        let posY = max(vf.minY + 20, min(appKitY - height / 2, vf.maxY - height - 20))
         panel.setFrame(NSRect(x: posX, y: posY, width: width, height: height), display: true)
         panel.alphaValue = 1
         panel.orderFrontRegardless()
@@ -98,16 +136,30 @@ final class FileDropBar {
         panel?.orderOut(nil)
     }
 
-    func showStatus(_ message: String, on screen: NSScreen? = nil, duration: TimeInterval = 2.6) {
+    func showStatus(_ message: String, on screen: NSScreen? = nil,
+                    duration: TimeInterval = 3.2, revealURLs: [URL]? = nil) {
         guard !isShowingDropZone,
               let targetScreen = screen ?? NSScreen.main ?? NSScreen.screens.first else { return }
         let (panel, target, field) = ensurePanel()
         dismissWork?.cancel()
-        panel.ignoresMouseEvents = true
+        if let revealURLs, !revealURLs.isEmpty {
+            panel.ignoresMouseEvents = false
+            target.onClick = { [weak self] in
+                self?.dismissWork?.cancel()
+                self?.panel?.orderOut(nil)
+                NSWorkspace.shared.activateFileViewerSelecting(revealURLs)
+            }
+        } else {
+            panel.ignoresMouseEvents = true
+            target.onClick = nil
+        }
         target.setHighlighted(false)
+        field.maximumNumberOfLines = 1
+        field.lineBreakMode = .byTruncatingMiddle
         field.stringValue = message
-        let width: CGFloat = 380
-        let height: CGFloat = 42
+        applyCornerRadius(23, target: target)
+        let width: CGFloat = 440
+        let height: CGFloat = 46
         let vf = targetScreen.visibleFrame
         let posX = vf.midX - width / 2
         let posY = vf.maxY - height - 10
@@ -116,6 +168,7 @@ final class FileDropBar {
         panel.orderFrontRegardless()
         let work = DispatchWorkItem { [weak self] in
             guard let self, !self.isShowingDropZone else { return }
+            self.dropView?.onClick = nil
             self.panel?.orderOut(nil)
         }
         dismissWork = work
@@ -127,15 +180,14 @@ private final class DropTargetView: NSView {
     var onDropFiles: (([URL]) -> Void)?
     var onRejectedDrag: (() -> Void)?
     var onHighlightChange: ((Bool) -> Void)?
-
-    private static let legacyFilenamesType = NSPasteboard.PasteboardType("NSFilenamesPboardType")
+    var onClick: (() -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.cornerRadius = frameRect.height / 2
+        layer?.cornerRadius = 22
         layer?.masksToBounds = true
-        registerForDraggedTypes([.fileURL, Self.legacyFilenamesType])
+        registerForDraggedTypes([.fileURL, legacyFilenamesPasteboardType])
     }
 
     required init?(coder: NSCoder) {
@@ -146,22 +198,16 @@ private final class DropTargetView: NSView {
         onHighlightChange?(value)
     }
 
-    private func extractFileURLs(from pb: NSPasteboard) -> [URL] {
-        if let urls = pb.readObjects(forClasses: [NSURL.self],
-                                     options: [.urlReadingFileURLsOnly: true]) as? [URL] {
-            let fileURLs = urls.filter { $0.isFileURL }
-            if !fileURLs.isEmpty {
-                return fileURLs
-            }
+    override func mouseUp(with event: NSEvent) {
+        if let onClick {
+            onClick()
+            return
         }
-        if let paths = pb.propertyList(forType: Self.legacyFilenamesType) as? [String] {
-            return paths.map { URL(fileURLWithPath: $0) }
-        }
-        return []
+        super.mouseUp(with: event)
     }
 
     override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
-        let urls = extractFileURLs(from: sender.draggingPasteboard)
+        let urls = extractDraggedFileURLs(from: sender.draggingPasteboard)
         if urls.isEmpty {
             setHighlighted(false)
             DispatchQueue.main.async {
@@ -183,10 +229,60 @@ private final class DropTargetView: NSView {
 
     override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
         setHighlighted(false)
-        let fileURLs = extractFileURLs(from: sender.draggingPasteboard)
+        let fileURLs = extractDraggedFileURLs(from: sender.draggingPasteboard)
         guard !fileURLs.isEmpty else { return false }
         DispatchQueue.main.async {
             self.onDropFiles?(fileURLs)
+        }
+        return true
+    }
+}
+
+final class StatusItemDropView: NSView {
+    var onDropFiles: (([URL]) -> Void)?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.cornerRadius = 4
+        registerForDraggedTypes([.fileURL, legacyFilenamesPasteboardType])
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    private func setHighlighted(_ highlighted: Bool) {
+        layer?.backgroundColor = highlighted
+            ? NSColor.controlAccentColor.withAlphaComponent(0.32).cgColor
+            : NSColor.clear.cgColor
+    }
+
+    override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        let urls = extractDraggedFileURLs(from: sender.draggingPasteboard)
+        guard !urls.isEmpty else {
+            setHighlighted(false)
+            return []
+        }
+        setHighlighted(true)
+        return .copy
+    }
+
+    override func draggingExited(_ sender: (any NSDraggingInfo)?) {
+        setHighlighted(false)
+    }
+
+    override func prepareForDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        true
+    }
+
+    override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        setHighlighted(false)
+        isHidden = true
+        let urls = extractDraggedFileURLs(from: sender.draggingPasteboard)
+        guard !urls.isEmpty else { return false }
+        DispatchQueue.main.async {
+            self.onDropFiles?(urls)
         }
         return true
     }

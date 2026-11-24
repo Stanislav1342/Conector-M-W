@@ -11,6 +11,28 @@ import (
 )
 
 var (
+	gdi32                       = syscall.NewLazyDLL("gdi32.dll")
+	createSolidBrush            = gdi32.NewProc("CreateSolidBrush")
+	deleteObject                = gdi32.NewProc("DeleteObject")
+	setBkMode                   = gdi32.NewProc("SetBkMode")
+	setTextColor                = gdi32.NewProc("SetTextColor")
+	registerClassExW            = user32.NewProc("RegisterClassExW")
+	createWindowExW             = user32.NewProc("CreateWindowExW")
+	showWindow                  = user32.NewProc("ShowWindow")
+	destroyWindow               = user32.NewProc("DestroyWindow")
+	defWindowProcW              = user32.NewProc("DefWindowProcW")
+	getMessageW                 = user32.NewProc("GetMessageW")
+	translateMessage            = user32.NewProc("TranslateMessage")
+	dispatchMessageW            = user32.NewProc("DispatchMessageW")
+	postQuitMessage             = user32.NewProc("PostQuitMessage")
+	invalidateRect              = user32.NewProc("InvalidateRect")
+	beginPaint                  = user32.NewProc("BeginPaint")
+	endPaint                    = user32.NewProc("EndPaint")
+	loadCursorW                 = user32.NewProc("LoadCursorW")
+	fillRect                    = user32.NewProc("FillRect")
+	frameRect                   = user32.NewProc("FrameRect")
+	drawTextW                   = user32.NewProc("DrawTextW")
+	getModuleHandleW            = kernel32.NewProc("GetModuleHandleW")
 	dragFinish                  = shell32Clip.NewProc("DragFinish")
 	getAsyncKeyState            = user32.NewProc("GetAsyncKeyState")
 	setWindowPos                = user32.NewProc("SetWindowPos")
@@ -21,15 +43,62 @@ var (
 	getClientRect               = user32.NewProc("GetClientRect")
 )
 
+type wndClassExW struct {
+	cbSize        uint32
+	style         uint32
+	lpfnWndProc   uintptr
+	cbClsExtra    int32
+	cbWndExtra    int32
+	hInstance     uintptr
+	hIcon         uintptr
+	hCursor       uintptr
+	hbrBackground uintptr
+	lpszMenuName  uintptr
+	lpszClassName uintptr
+	hIconSm       uintptr
+}
+
+type paintStruct struct {
+	hdc        uintptr
+	fErase     int32
+	rcPaint    winRect
+	fRestore   int32
+	fIncUpdate int32
+	reserved   [32]byte
+}
+
+type winMsg struct {
+	hwnd     uintptr
+	message  uint32
+	wParam   uintptr
+	lParam   uintptr
+	time     uint32
+	pt       [2]int32
+	lPrivate uint32
+}
+
+func drawTextLine(hdc uintptr, text string, rc *winRect) {
+	u16, err := syscall.UTF16FromString(text)
+	if err != nil {
+		return
+	}
+	setBkMode.Call(hdc, 1) // TRANSPARENT
+	setTextColor.Call(hdc, 0x00FFFFFF)
+	drawTextW.Call(hdc, uintptr(unsafe.Pointer(&u16[0])), uintptr(len(u16)-1), uintptr(unsafe.Pointer(rc)), 0x0825) // DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX
+}
+
 type dropBarSession struct {
-	hwnd         uintptr
-	onDrop       func([]string)
-	hBgBrush     uintptr
-	hBorderBrush uintptr
-	wasLMBDown   bool
-	dragArmed    bool
-	visible      bool
-	releaseAt    time.Time
+	hwnd          uintptr
+	onDrop        func([]string)
+	hBgBrush      uintptr
+	hBorderBrush  uintptr
+	hSuccessBrush uintptr
+	wasLMBDown    bool
+	dragArmed     bool
+	visible       bool
+	releaseAt     time.Time
+	statusText    string
+	statusUntil   time.Time
 }
 
 var (
@@ -78,15 +147,18 @@ func startDropBar(onDrop func([]string)) func() {
 			ready <- 0
 			return
 		}
-		hBgBrush, _, _ := createSolidBrush.Call(0x00342218)     // dark slate RGB(24, 34, 52)
-		hBorderBrush, _, _ := createSolidBrush.Call(0x00F6823B) // blue RGB(59, 130, 246)
+		hBgBrush, _, _ := createSolidBrush.Call(0x00342218)      // dark slate RGB(24, 34, 52)
+		hBorderBrush, _, _ := createSolidBrush.Call(0x00F6823B)  // blue RGB(59, 130, 246)
+		hSuccessBrush, _, _ := createSolidBrush.Call(0x005EC522) // green RGB(34, 197, 94)
 		defer deleteObject.Call(hBgBrush)
 		defer deleteObject.Call(hBorderBrush)
+		defer deleteObject.Call(hSuccessBrush)
 
 		sess := &dropBarSession{
-			onDrop:       onDrop,
-			hBgBrush:     hBgBrush,
-			hBorderBrush: hBorderBrush,
+			onDrop:        onDrop,
+			hBgBrush:      hBgBrush,
+			hBorderBrush:  hBorderBrush,
+			hSuccessBrush: hSuccessBrush,
 		}
 		dropBarMu.Lock()
 		currentDropBar = sess
@@ -153,6 +225,17 @@ func startDropBar(onDrop func([]string)) func() {
 }
 
 func (s *dropBarSession) pollDragState() {
+	if !s.statusUntil.IsZero() {
+		if time.Now().Before(s.statusUntil) {
+			return
+		}
+		s.statusUntil = time.Time{}
+		s.statusText = ""
+		showWindow.Call(s.hwnd, 0) // SW_HIDE
+		s.visible = false
+		return
+	}
+
 	state, _, _ := getAsyncKeyState.Call(0x01) // VK_LBUTTON
 	lmbDown := (state & 0x8000) != 0
 
@@ -231,8 +314,13 @@ func dropBarWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 			var rc winRect
 			getClientRect.Call(hwnd, uintptr(unsafe.Pointer(&rc)))
 			fillRect.Call(hdc, uintptr(unsafe.Pointer(&rc)), sess.hBgBrush)
-			frameRect.Call(hdc, uintptr(unsafe.Pointer(&rc)), sess.hBorderBrush)
-			drawTextLine(hdc, "↓ Отпустите файлы для отправки на Mac", &rc)
+			if !sess.statusUntil.IsZero() && time.Now().Before(sess.statusUntil) {
+				frameRect.Call(hdc, uintptr(unsafe.Pointer(&rc)), sess.hSuccessBrush)
+				drawTextLine(hdc, sess.statusText, &rc)
+			} else {
+				frameRect.Call(hdc, uintptr(unsafe.Pointer(&rc)), sess.hBorderBrush)
+				drawTextLine(hdc, "↓ Отпустите файлы для отправки на Mac (Загрузки)", &rc)
+			}
 			endPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
 		}
 		return 0
@@ -255,12 +343,20 @@ func dropBarWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 			}
 		}
 		dragFinish.Call(hDrop)
-		showWindow.Call(hwnd, 0)
-		sess.visible = false
 		sess.dragArmed = false
 		sess.releaseAt = time.Time{}
 		if len(paths) > 0 && sess.onDrop != nil {
+			if len(paths) == 1 {
+				sess.statusText = "✓ Отправлено на Mac в «Загрузки»"
+			} else {
+				sess.statusText = fmt.Sprintf("✓ Отправлено на Mac в «Загрузки» (%d)", len(paths))
+			}
+			sess.statusUntil = time.Now().Add(1800 * time.Millisecond)
+			invalidateRect.Call(hwnd, 0, 0)
 			go sess.onDrop(paths)
+		} else {
+			showWindow.Call(hwnd, 0)
+			sess.visible = false
 		}
 		return 0
 	case 0x0010: // WM_CLOSE

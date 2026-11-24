@@ -25,8 +25,6 @@ var fake struct {
 	clipHasFiles bool
 	awakePulses  int
 	shortcuts    []string
-	snipCalled   int
-	snipPayload  []byte
 	dropHandler  func([]string)
 }
 
@@ -76,16 +74,6 @@ func sendShortcut(action string) error {
 	return nil
 }
 
-func startSnipOverlay(onCaptured func([]byte)) {
-	fake.mu.Lock()
-	fake.snipCalled++
-	payload := append([]byte(nil), fake.snipPayload...)
-	fake.mu.Unlock()
-	if len(payload) > 0 && onCaptured != nil {
-		go onCaptured(payload)
-	}
-}
-
 func startDropBar(onDrop func([]string)) func() {
 	fake.mu.Lock()
 	fake.dropHandler = onDrop
@@ -95,18 +83,6 @@ func startDropBar(onDrop func([]string)) func() {
 		fake.dropHandler = nil
 		fake.mu.Unlock()
 	}
-}
-
-func setFakeSnipPayload(pngBytes []byte) {
-	fake.mu.Lock()
-	fake.snipPayload = append([]byte(nil), pngBytes...)
-	fake.mu.Unlock()
-}
-
-func snipCalls() int {
-	fake.mu.Lock()
-	defer fake.mu.Unlock()
-	return fake.snipCalled
 }
 
 func triggerFakeDrop(paths []string) {
@@ -203,8 +179,6 @@ func resetFake(t *testing.T) {
 	fake.clipFiles, fake.clipHasFiles = nil, false
 	fake.awakePulses = 0
 	fake.shortcuts = nil
-	fake.snipCalled = 0
-	fake.snipPayload = nil
 	fake.dropHandler = nil
 	fake.mu.Unlock()
 }

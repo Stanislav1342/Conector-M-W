@@ -177,8 +177,11 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
     var lastReinforce = Date.distantPast
     var lastDragProbe = Date.distantPast
     var dragStartChangeCount = NSPasteboard(name: .drag).changeCount
-    var dragStartedBelowTop = false
+    var dragStartedLeftOfRight = false
     var pendingDropHide: DispatchWorkItem?
+    var statusItemDropView: StatusItemDropView?
+    var lastReceivedFiles: [URL] = []
+    var showLastReceivedItem: NSMenuItem!
     var offeredWindowsFiles: [OfferedFile] = []
     var offerGeneration: UInt64 = 0
     var latencyActivity: NSObjectProtocol?
@@ -224,11 +227,14 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         sendFileItem = menuItem("Отправить файл на Windows…", action: #selector(pickAndSendFiles))
         receiveFileItem = menuItem("Сохранить файл с Windows", action: #selector(downloadOfferedFiles))
         receiveFileItem.isHidden = true
+        showLastReceivedItem = menuItem("Показать последний файл в Finder", action: #selector(revealLastReceivedFiles))
+        showLastReceivedItem.isHidden = true
         lockItem = menuItem("Заблокировать Windows", action: #selector(lockWindows))
         disconnectItem = menuItem("Отключить Windows", action: #selector(disconnect))
         menu.addItem(pauseItem)
         menu.addItem(sendFileItem)
         menu.addItem(receiveFileItem)
+        menu.addItem(showLastReceivedItem)
         menu.addItem(lockItem)
         menu.addItem(disconnectItem)
         menu.addItem(.separator())
@@ -237,8 +243,19 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         menu.addItem(menuItem("Выйти из Conector-M-W", action: #selector(quit)))
         item.menu = menu
 
+        if let button = item.button {
+            let dropView = StatusItemDropView(frame: button.bounds)
+            dropView.autoresizingMask = [.width, .height]
+            dropView.isHidden = true
+            dropView.onDropFiles = { [weak self] urls in
+                self?.sendFilesToWindows(urls, destination: "downloads")
+            }
+            button.addSubview(dropView)
+            statusItemDropView = dropView
+        }
+
         fileDropBar.onDrop = { [weak self] urls in
-            self?.sendFilesToWindows(urls, destination: nil)
+            self?.sendFilesToWindows(urls, destination: "downloads")
         }
 
         timer = Timer(timeInterval: 0.006, repeats: true) { [weak self] _ in self?.tick() }
@@ -758,8 +775,9 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         } ?? NSScreen.main ?? NSScreen.screens.first
     }
 
-    private func fileDestinationLabel() -> String {
-        controlSettings.fileDestination == "desktop" ? "Рабочий стол" : "Загрузки"
+    @objc func revealLastReceivedFiles() {
+        guard !lastReceivedFiles.isEmpty else { return }
+        NSWorkspace.shared.activateFileViewerSelecting(lastReceivedFiles)
     }
 
     @objc func pickAndSendFiles() {
@@ -772,7 +790,7 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         panel.prompt = "Отправить на Windows"
         NSApp.activate(ignoringOtherApps: true)
         if panel.runModal() == .OK, !panel.urls.isEmpty {
-            sendFilesToWindows(panel.urls, destination: nil)
+            sendFilesToWindows(panel.urls, destination: "downloads")
         }
     }
 
@@ -786,10 +804,15 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         downloadBatch(batch, using: transfer, into: downloadsDir) { [weak self] saved, firstError in
             guard let self else { return }
             if !saved.isEmpty {
+                self.lastReceivedFiles = saved
+                self.showLastReceivedItem.title = saved.count == 1
+                    ? "Показать в Finder: \(saved[0].lastPathComponent)"
+                    : "Показать в Finder (\(saved.count) файлов)"
+                self.showLastReceivedItem.isHidden = false
                 let text = saved.count == 1
-                    ? "Сохранено в «Загрузки»: \(saved[0].lastPathComponent)"
-                    : "Сохранено в «Загрузки»: \(saved.count) файлов"
-                self.fileDropBar.showStatus(text, on: self.builtInScreen(), duration: 3.0)
+                    ? "✓ В «Загрузки»: \(saved[0].lastPathComponent) · Показать"
+                    : "✓ В «Загрузки»: \(saved.count) файлов · Показать"
+                self.fileDropBar.showStatus(text, on: self.builtInScreen(), duration: 6.0, revealURLs: saved)
                 self.log.record("downloaded \(saved.count) file(s) from Windows")
             } else if let firstError {
                 self.fileDropBar.showStatus("Не удалось скачать файл: \(firstError.localizedDescription)",
@@ -824,7 +847,8 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
                                     limit: Int = 20) -> [(url: URL, size: Int64, mtime: TimeInterval)] {
         let fm = FileManager.default
         var valid: [(url: URL, size: Int64, mtime: TimeInterval)] = []
-        for url in urls.prefix(limit) {
+        for rawURL in urls.prefix(limit) {
+            let url = (rawURL as NSURL).filePathURL ?? rawURL
             guard url.isFileURL,
                   let attrs = try? fm.attributesOfItem(atPath: url.path),
                   (attrs[.type] as? FileAttributeType) == .typeRegular,
@@ -846,7 +870,7 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             }
             return
         }
-        let dest = destination ?? controlSettings.fileDestination
+        let dest = destination ?? "downloads"
         let batchID = UUID().uuidString
         if !silent {
             let label = items.count == 1 ? items[0].url.lastPathComponent : "\(items.count) файлов"
@@ -859,15 +883,15 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
                 self.log.record("uploaded \(uploaded.count) file(s) dest=\(dest)")
                 if !silent {
                     let text = uploaded.count == 1
-                        ? "Отправлено в «\(self.fileDestinationLabel())»: \(uploaded[0])"
-                        : "Отправлено на Windows: \(uploaded.count) файлов"
-                    self.fileDropBar.showStatus(text, on: self.builtInScreen(), duration: 2.8)
+                        ? "✓ Отправлено на Windows в «Загрузки»: \(uploaded[0])"
+                        : "✓ Отправлено на Windows в «Загрузки»: \(uploaded.count) файлов"
+                    self.fileDropBar.showStatus(text, on: self.builtInScreen(), duration: 4.0)
                 }
             } else if let firstError {
                 self.log.record("file upload failed: \(firstError.localizedDescription)")
                 if !silent {
                     self.fileDropBar.showStatus("Ошибка отправки: \(firstError.localizedDescription)",
-                                                on: self.builtInScreen(), duration: 3.0)
+                                                on: self.builtInScreen(), duration: 3.5)
                 }
             }
         }
@@ -954,14 +978,8 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         refreshFileMenuItems()
         guard receiverSupportsFiles, let transfer = fileTransfer else { return }
         let fm = FileManager.default
-        let targetDir: URL
-        if controlSettings.fileDestination == "desktop" {
-            targetDir = fm.urls(for: .desktopDirectory, in: .userDomainMask).first
-                ?? fm.homeDirectoryForCurrentUser.appendingPathComponent("Desktop", isDirectory: true)
-        } else {
-            targetDir = fm.urls(for: .downloadsDirectory, in: .userDomainMask).first
-                ?? fm.homeDirectoryForCurrentUser.appendingPathComponent("Downloads", isDirectory: true)
-        }
+        let targetDir = fm.urls(for: .downloadsDirectory, in: .userDomainMask).first
+            ?? fm.homeDirectoryForCurrentUser.appendingPathComponent("Downloads", isDirectory: true)
         let label = files.count == 1 ? files[0].name : "\(files.count) файлов"
         fileDropBar.showStatus("Получаем с Windows: \(label)…", on: builtInScreen(), duration: 2.5)
         downloadBatch(files, using: transfer, into: targetDir) { [weak self] saved, firstError in
@@ -976,14 +994,19 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
                     pb.writeObjects(saved as [NSURL])
                     self.lastClipboardChangeCount = pb.changeCount
                 }
+                self.lastReceivedFiles = saved
+                self.showLastReceivedItem.title = saved.count == 1
+                    ? "Показать в Finder: \(saved[0].lastPathComponent)"
+                    : "Показать в Finder (\(saved.count) файлов)"
+                self.showLastReceivedItem.isHidden = false
                 let text = saved.count == 1
-                    ? "Получено в «\(self.fileDestinationLabel())»: \(saved[0].lastPathComponent)"
-                    : "Получено в «\(self.fileDestinationLabel())»: \(saved.count) файлов"
-                self.fileDropBar.showStatus(text, on: self.builtInScreen(), duration: 3.0)
+                    ? "✓ В «Загрузки»: \(saved[0].lastPathComponent) · Показать"
+                    : "✓ В «Загрузки»: \(saved.count) файлов · Показать"
+                self.fileDropBar.showStatus(text, on: self.builtInScreen(), duration: 6.0, revealURLs: saved)
                 self.log.record("received \(saved.count) dropped file(s) from Windows")
             } else if let firstError {
                 self.fileDropBar.showStatus("Ошибка получения файла: \(firstError.localizedDescription)",
-                                            on: self.builtInScreen(), duration: 3.0)
+                                            on: self.builtInScreen(), duration: 3.5)
             }
         }
     }
@@ -1043,7 +1066,7 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         if receiverSupportsFiles && controlSettings.clipboardFileSync,
            let urls = pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
            !urls.isEmpty {
-            let fileURLs = urls.filter { $0.isFileURL }
+            let fileURLs = urls.compactMap { ($0 as NSURL).filePathURL ?? ($0.isFileURL ? $0 : nil) }
             let valid = filterRegularFiles(fileURLs, maxBytes: 25 * 1024 * 1024)
             let totalSize = valid.reduce(Int64(0)) { $0 + $1.size }
             guard valid.count == fileURLs.prefix(20).count, !valid.isEmpty, totalSize <= 25 * 1024 * 1024 else {
@@ -1193,8 +1216,9 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         suppressedShortcutKeys.removeAll()
         pendingDropHide?.cancel()
         pendingDropHide = nil
-        dragStartedBelowTop = false
+        dragStartedLeftOfRight = false
         fileDropBar.hideDropZone()
+        statusItemDropView?.isHidden = true
         if let act = latencyActivity {
             ProcessInfo.processInfo.endActivity(act)
             latencyActivity = nil
@@ -1452,45 +1476,49 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
                 if type == .leftMouseDown {
                     dragStartChangeCount = NSPasteboard(name: .drag).changeCount
                     let bounds = CGDisplayBounds(CGGetOnlineBuiltInDisplay())
-                    dragStartedBelowTop = bounds.width > 0 && event.location.y > bounds.minY + 60
+                    dragStartedLeftOfRight = bounds.width > 0 && event.location.x < bounds.maxX - 60
                 }
             case .leftMouseUp, .rightMouseUp, .otherMouseUp:
                 localButtons.remove(button)
-                if type == .leftMouseUp { dragStartedBelowTop = false }
+                if type == .leftMouseUp { dragStartedLeftOfRight = false }
             case .keyDown: localKeys.insert(key)
             case .keyUp: localKeys.remove(key)
             default: break
             }
             if linked, receiverSupportsFiles, controlSettings.fileTransferEnabled {
-                if type == .leftMouseDragged, dragStartedBelowTop {
+                if type == .leftMouseDragged {
                     let bounds = CGDisplayBounds(CGGetOnlineBuiltInDisplay())
-                    if bounds.width > 0, event.location.x >= bounds.minX, event.location.x < bounds.maxX {
-                        if event.location.y <= bounds.minY + 72 {
-                            if !fileDropBar.isShowingDropZone {
-                                let now = Date()
-                                if now.timeIntervalSince(lastDragProbe) >= 0.05 {
-                                    lastDragProbe = now
-                                    if NSPasteboard(name: .drag).changeCount != dragStartChangeCount,
-                                       let screen = builtInScreen() {
-                                        pendingDropHide?.cancel()
-                                        pendingDropHide = nil
-                                        fileDropBar.showDropZone(near: event.location.x, on: screen, destinationLabel: fileDestinationLabel())
-                                    }
-                                }
-                            }
-                        } else if event.location.y > bounds.minY + 160, fileDropBar.isShowingDropZone {
+                    let now = Date()
+                    if now.timeIntervalSince(lastDragProbe) >= 0.05 {
+                        lastDragProbe = now
+                        if NSPasteboard(name: .drag).changeCount != dragStartChangeCount,
+                           dragPasteboardHasFiles() {
                             pendingDropHide?.cancel()
                             pendingDropHide = nil
-                            fileDropBar.hideDropZone()
+                            statusItemDropView?.isHidden = false
+                            if dragStartedLeftOfRight,
+                               bounds.width > 0,
+                               event.location.y >= bounds.minY,
+                               event.location.y < bounds.maxY,
+                               event.location.x >= bounds.maxX - 56,
+                               !fileDropBar.isShowingDropZone,
+                               let screen = builtInScreen() {
+                                fileDropBar.showDropZone(nearQuartzY: event.location.y, on: screen)
+                            }
                         }
                     }
-                } else if type == .leftMouseUp, fileDropBar.isShowingDropZone {
+                    if fileDropBar.isShowingDropZone, bounds.width > 0, event.location.x < bounds.maxX - 280 {
+                        fileDropBar.hideDropZone()
+                    }
+                } else if type == .leftMouseUp,
+                          fileDropBar.isShowingDropZone || (statusItemDropView?.isHidden == false) {
                     pendingDropHide?.cancel()
                     let hideWork = DispatchWorkItem { [weak self] in
                         self?.fileDropBar.hideDropZone()
+                        self?.statusItemDropView?.isHidden = true
                     }
                     pendingDropHide = hideWork
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.20, execute: hideWork)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: hideWork)
                 }
             }
             guard type == .mouseMoved else { return original }
@@ -1567,12 +1595,8 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
                     log.record("shortcut snip")
                 } else {
                     pending.append(contentsOf: [
-                        Input(kind: "key", code: 0x15b, down: true),
-                        Input(kind: "key", code: 0x2a, down: true),
-                        Input(kind: "key", code: 0x1f, down: true),
-                        Input(kind: "key", code: 0x1f, down: false),
-                        Input(kind: "key", code: 0x2a, down: false),
-                        Input(kind: "key", code: 0x15b, down: false),
+                        Input(kind: "key", code: 0x137, down: true),
+                        Input(kind: "key", code: 0x137, down: false),
                     ])
                     flushIfIdle()
                 }

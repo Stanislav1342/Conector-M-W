@@ -509,13 +509,14 @@ private struct SettingsView: View {
             Section("Буфер обмена") {
                 Toggle("Общий буфер обмена (текст и скриншоты)", isOn: $model.settings.clipboardSync)
             }
-            Section("Передача файлов") {
-                Toggle("Перетаскивание файлов в верхний край на Windows", isOn: $model.settings.fileTransferEnabled)
-                Picker("Сохранять файлы на Windows в", selection: $model.settings.fileDestination) {
-                    Text("Загрузки").tag("downloads")
-                    Text("Рабочий стол").tag("desktop")
-                }
+            Section {
+                Toggle("Перетаскивание файлов (правый край Mac / нижний край Windows)", isOn: $model.settings.fileTransferEnabled)
                 Toggle("Синхронизировать скопированные файлы через буфер (до 25 МБ)", isOn: $model.settings.clipboardFileSync)
+            } header: {
+                Text("Передача файлов")
+            } footer: {
+                Text("Переданные файлы сохраняются в папку «Загрузки» на обоих устройствах. На Mac файл также можно перетащить прямо на значок Conector-M-W в строке меню.")
+                    .foregroundStyle(.secondary)
             }
             Section("Блокировка и экран") {
                 Toggle("Не давать Windows гасить экран, пока активен Mac", isOn: $model.settings.keepWindowsAwake)
@@ -534,7 +535,7 @@ private struct SettingsView: View {
             }
             Section {
                 Toggle("⌘ Command работает как Ctrl", isOn: $model.settings.commandIsControl)
-                Toggle("Привычные сочетания Mac (текст и скриншоты ⌘+Shift+4/5)", isOn: $model.settings.macShortcuts)
+                Toggle("Привычные сочетания Mac (текст и скриншот ⌘+Shift+4/5 → Print Screen)", isOn: $model.settings.macShortcuts)
                 Toggle("⌘ + Пробел переключает язык на Windows", isOn: $model.settings.commandSpaceSwitchesLanguage)
                 Toggle("⌘ + L блокирует Windows", isOn: $model.settings.commandLLocksWindows)
                 LabeledContent("Скорость курсора Windows") {
