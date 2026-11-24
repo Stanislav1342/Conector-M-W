@@ -521,6 +521,7 @@ private struct SettingsView: View {
                     Text("Выключено").tag(ThreeFingerSwipeAction.off)
                 }
                 Toggle("Свайп 3 пальцами вверх — обзор окон (Win + Tab)", isOn: $model.settings.threeFingerSwipeUp)
+                Toggle("Свайп 3 пальцами вниз — свернуть окна (Win + D)", isOn: $model.settings.threeFingerSwipeDown)
             }
             Section {
                 Toggle("⌘ Command работает как Ctrl", isOn: $model.settings.commandIsControl)
@@ -541,7 +542,7 @@ private struct SettingsView: View {
                 LabeledContent("Плавность прокрутки") {
                     HStack(spacing: 10) {
                         Image(systemName: "tortoise").foregroundStyle(.secondary)
-                        Slider(value: $model.settings.scrollSmoothness, in: 0.2...2.0)
+                        Slider(value: $model.settings.scrollSmoothness, in: 0.2...3.0)
                             .frame(width: 180)
                             .accessibilityLabel("Плавность прокрутки")
                         Image(systemName: "hare").foregroundStyle(.secondary)

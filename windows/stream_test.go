@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"image"
 	"image/color"
 	"image/png"
@@ -364,4 +365,78 @@ func TestStreamAwakeFramePulsesKeepAwake(t *testing.T) {
 	waitFor(t, "keep-awake pulse", func() bool {
 		return awakePulses() >= 1
 	})
+}
+
+func TestShortcutCombos(t *testing.T) {
+	expectedCounts := map[string]int{
+		"desktopNext":    3,
+		"desktopPrev":    3,
+		"taskView":       2,
+		"showDesktop":    2,
+		"switchAppNext":  2,
+		"switchAppPrev":  3,
+		"browserForward": 2,
+		"browserBack":    2,
+	}
+	for action, wantLen := range expectedCounts {
+		if !validShortcutAction(action) {
+			t.Fatalf("%s should be valid", action)
+		}
+		keys, ok := shortcutCombo(action)
+		if !ok || len(keys) != wantLen {
+			t.Fatalf("%s combo ok=%v len=%d, want %d", action, ok, len(keys), wantLen)
+		}
+	}
+	if validShortcutAction("unknown") {
+		t.Fatal("unknown shortcut should be invalid")
+	}
+	next, _ := shortcutCombo("desktopNext")
+	if !next[1].extended || next[1].vk != 0x5B || !next[2].extended || next[2].vk != 0x27 {
+		t.Fatalf("desktopNext must mark Win and Right arrow as extended: %+v", next)
+	}
+	prev, _ := shortcutCombo("desktopPrev")
+	if !prev[1].extended || prev[1].vk != 0x5B || !prev[2].extended || prev[2].vk != 0x25 {
+		t.Fatalf("desktopPrev must mark Win and Left arrow as extended: %+v", prev)
+	}
+}
+
+func TestStreamShortcut(t *testing.T) {
+	h := newStream(t)
+	ws := h.connect()
+	h.send(ws, inputFrame{Type: "shortcut", Capture: 1, Action: "desktopNext"})
+	h.send(ws, inputFrame{Capture: 4, Events: []event{{Kind: "enter", X: 100}}})
+	if got := h.read(ws); got.Type != "entered" || got.Capture != 4 {
+		t.Fatalf("got %+v, want entered for capture 4", got)
+	}
+	h.send(ws, inputFrame{Type: "shortcut", Capture: 3, Action: "desktopPrev"})
+	h.send(ws, inputFrame{Type: "shortcut", Capture: 4, Action: "unknown"})
+	h.send(ws, inputFrame{Type: "shortcut", Capture: 4, Action: "desktopNext"})
+	h.send(ws, inputFrame{Type: "shortcut", Capture: 4, Action: "showDesktop"})
+	waitFor(t, "two valid shortcuts", func() bool {
+		return len(sentShortcuts()) == 2
+	})
+	got := sentShortcuts()
+	if got[0] != "desktopNext" || got[1] != "showDesktop" {
+		t.Fatalf("shortcuts = %v, want [desktopNext showDesktop]", got)
+	}
+	// Stream must still accept events after invalid/stale shortcut frames.
+	h.send(ws, inputFrame{Capture: 4, Events: []event{{Kind: "key", Code: 0x1e, Down: true}}})
+	waitFor(t, "key held after shortcut", func() bool { return h.held(0x1e) })
+}
+
+func TestDeviceInfoAdvertisesShortcutSupport(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/device", nil)
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	rec := httptest.NewRecorder()
+	deviceInfo(testToken)(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var info map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &info); err != nil {
+		t.Fatal(err)
+	}
+	if info["stream"] != "1" || info["shortcut"] != "1" {
+		t.Fatalf("info = %+v, want stream=1 and shortcut=1", info)
+	}
 }

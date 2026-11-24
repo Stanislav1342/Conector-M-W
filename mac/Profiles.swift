@@ -44,7 +44,7 @@ struct ControlSettings {
         set { defaults.set(newValue, forKey: "cursorSpeed") }
     }
     var scrollSmoothness: Double {
-        get { defaults.object(forKey: "scrollSmoothness") as? Double ?? 0.6 }
+        get { defaults.object(forKey: "scrollSmoothness") as? Double ?? 1.0 }
         set { defaults.set(newValue, forKey: "scrollSmoothness") }
     }
     var commandLLocksWindows: Bool {
@@ -68,6 +68,10 @@ struct ControlSettings {
     var threeFingerSwipeUp: Bool {
         get { defaults.object(forKey: "threeFingerSwipeUp") as? Bool ?? true }
         set { defaults.set(newValue, forKey: "threeFingerSwipeUp") }
+    }
+    var threeFingerSwipeDown: Bool {
+        get { defaults.object(forKey: "threeFingerSwipeDown") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "threeFingerSwipeDown") }
     }
 }
 

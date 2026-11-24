@@ -26,13 +26,13 @@ struct ScrollMotion {
     private var remainderY = 0.0
 
     init(smoothness: Double) {
-        self.smoothness = smoothness.isFinite ? min(2.0, max(0.2, smoothness)) : 0.6
+        self.smoothness = smoothness.isFinite ? min(3.0, max(0.2, smoothness)) : 1.0
     }
 
     mutating func scale(x: Double, y: Double, continuous: Bool) -> (x: Int32, y: Int32) {
-        let clampedX = continuous ? min(2000.0, max(-2000.0, x)) : min(50.0, max(-50.0, x))
-        let clampedY = continuous ? min(2000.0, max(-2000.0, y)) : min(50.0, max(-50.0, y))
-        let factor = (continuous ? 1.6 : 120.0) * smoothness
+        let clampedX = continuous ? min(4000.0, max(-4000.0, x)) : min(50.0, max(-50.0, x))
+        let clampedY = continuous ? min(4000.0, max(-4000.0, y)) : min(50.0, max(-50.0, y))
+        let factor = (continuous ? 2.2 : 120.0) * smoothness
         let scaledX = clampedX * factor + remainderX
         let scaledY = clampedY * factor + remainderY
         let wholeX = scaledX.rounded(.towardZero)
@@ -42,6 +42,40 @@ struct ScrollMotion {
         let outX = Int32(min(10000.0, max(-10000.0, wholeX)))
         let outY = Int32(min(10000.0, max(-10000.0, wholeY)))
         return (outX, outY)
+    }
+}
+
+struct TopEdgePush {
+    let threshold: Int32
+    let maxStep: Int32
+    let window: TimeInterval
+    private var push: Int32 = 0
+    private var lastPush: TimeInterval = -.infinity
+
+    init(threshold: Int32 = -75, maxStep: Int32 = -45, window: TimeInterval = 0.25) {
+        self.threshold = threshold
+        self.maxStep = maxStep
+        self.window = window
+    }
+
+    mutating func reset() {
+        push = 0
+        lastPush = -.infinity
+    }
+
+    mutating func advance(dx: Int32, dy: Int32, atTopEdge: Bool, now: TimeInterval) -> Bool {
+        guard atTopEdge, dy < 0, abs(dx) <= -dy else {
+            reset()
+            return false
+        }
+        if now - lastPush > window {
+            push = 0
+        }
+        lastPush = now
+        push += max(maxStep, dy)
+        guard push <= threshold else { return false }
+        reset()
+        return true
     }
 }
 
@@ -56,12 +90,14 @@ enum SwipeDirection: Equatable {
     case left
     case right
     case up
+    case down
 }
 
 struct ThreeFingerSwipeDetector {
     private var anchor: (x: Double, y: Double)?
     private var triggeredInGesture = false
     private var lastTrigger: TimeInterval = -.infinity
+    private var lastUpdate: TimeInterval = -.infinity
 
     mutating func reset() {
         anchor = nil
@@ -69,6 +105,10 @@ struct ThreeFingerSwipeDetector {
     }
 
     mutating func update(touchCount: Int, x: Double, y: Double, now: TimeInterval) -> SwipeDirection? {
+        if now - lastUpdate > 0.25 {
+            reset()
+        }
+        lastUpdate = now
         guard touchCount == 3 else {
             reset()
             return nil
@@ -80,26 +120,54 @@ struct ThreeFingerSwipeDetector {
         guard !triggeredInGesture, now - lastTrigger >= 0.35 else { return nil }
         let dx = x - anchor.x
         let dy = y - anchor.y
-        if abs(dx) >= 0.14, abs(dx) > abs(dy) * 1.4 {
+        if abs(dx) >= 0.11, abs(dx) > abs(dy) * 1.35 {
             triggeredInGesture = true
             lastTrigger = now
             return dx < 0 ? .left : .right
         }
-        if dy >= 0.14, dy > abs(dx) * 1.4 {
+        if dy >= 0.11, dy > abs(dx) * 1.35 {
             triggeredInGesture = true
             lastTrigger = now
             return .up
+        }
+        if dy <= -0.11, -dy > abs(dx) * 1.35 {
+            triggeredInGesture = true
+            lastTrigger = now
+            return .down
         }
         return nil
     }
 }
 
-func swipeKeySequence(direction: SwipeDirection, horizontalAction: ThreeFingerSwipeAction, upEnabled: Bool) -> [Input] {
+func swipeShortcutAction(direction: SwipeDirection, horizontalAction: ThreeFingerSwipeAction, upEnabled: Bool, downEnabled: Bool) -> String? {
+    switch direction {
+    case .up:
+        return upEnabled ? "taskView" : nil
+    case .down:
+        return downEnabled ? "showDesktop" : nil
+    case .left, .right:
+        switch horizontalAction {
+        case .off:
+            return nil
+        case .desktops:
+            return direction == .left ? "desktopNext" : "desktopPrev"
+        case .switchApps:
+            return direction == .left ? "switchAppNext" : "switchAppPrev"
+        case .browserHistory:
+            return direction == .left ? "browserForward" : "browserBack"
+        }
+    }
+}
+
+func swipeKeySequence(direction: SwipeDirection, horizontalAction: ThreeFingerSwipeAction, upEnabled: Bool, downEnabled: Bool = true) -> [Input] {
     let combo: [UInt16]
     switch direction {
     case .up:
         guard upEnabled else { return [] }
         combo = [0x15b, 0x0f] // Win + Tab
+    case .down:
+        guard downEnabled else { return [] }
+        combo = [0x15b, 0x20] // Win + D
     case .left, .right:
         switch horizontalAction {
         case .off:

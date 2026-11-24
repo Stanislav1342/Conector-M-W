@@ -20,6 +20,7 @@ var fake struct {
 	clipImage    []byte
 	clipHasImage bool
 	awakePulses  int
+	shortcuts    []string
 }
 
 func (e event) send() error {
@@ -52,6 +53,16 @@ func pulseKeepAwake() {
 	fake.mu.Lock()
 	fake.awakePulses++
 	fake.mu.Unlock()
+}
+
+func sendShortcut(action string) error {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.err != nil {
+		return fake.err
+	}
+	fake.shortcuts = append(fake.shortcuts, action)
+	return nil
 }
 
 type trayApp struct {
@@ -117,6 +128,7 @@ func resetFake(t *testing.T) {
 	fake.clipSeq, fake.clipText, fake.clipHasText = 0, "", false
 	fake.clipImage, fake.clipHasImage = nil, false
 	fake.awakePulses = 0
+	fake.shortcuts = nil
 	fake.mu.Unlock()
 }
 
@@ -124,6 +136,12 @@ func awakePulses() int {
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
 	return fake.awakePulses
+}
+
+func sentShortcuts() []string {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	return append([]string(nil), fake.shortcuts...)
 }
 
 func sentEvents() []event {

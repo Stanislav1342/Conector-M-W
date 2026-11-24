@@ -63,18 +63,18 @@ test("huge deltas are clamped before scaling") {
 
 test("scroll smoothness scales trackpad continuous deltas and carries remainder") {
     expectEqual(ScrollMotion(smoothness: 0.05).smoothness, 0.2)
-    expectEqual(ScrollMotion(smoothness: 5).smoothness, 2.0)
-    expectEqual(ScrollMotion(smoothness: .nan).smoothness, 0.6)
+    expectEqual(ScrollMotion(smoothness: 5).smoothness, 3.0)
+    expectEqual(ScrollMotion(smoothness: .nan).smoothness, 1.0)
 
-    var scroll = ScrollMotion(smoothness: 0.5) // factor = 0.8
+    var scroll = ScrollMotion(smoothness: 0.5) // factor = 1.1
     let step1 = scroll.scale(x: 0.5, y: 1.0, continuous: true)
-    expectEqual(step1.x, 0)
-    expectEqual(step1.y, 0)
+    expectEqual(step1.x, 0) // 0.55 -> 0, rem 0.55
+    expectEqual(step1.y, 1) // 1.1 -> 1, rem 0.1
     let step2 = scroll.scale(x: 0.5, y: 1.0, continuous: true)
-    expectEqual(step2.x, 0) // 0.4 + 0.4 = 0.8
-    expectEqual(step2.y, 1) // 0.8 + 0.8 = 1.6 -> 1, rem 0.6
+    expectEqual(step2.x, 1) // 0.55 + 0.55 = 1.1 -> 1, rem 0.1
+    expectEqual(step2.y, 1) // 0.1 + 1.1 = 1.2 -> 1, rem 0.2
     let step3 = scroll.scale(x: 0.5, y: 0.0, continuous: true)
-    expectEqual(step3.x, 1) // 0.8 + 0.4 = 1.2 -> 1
+    expectEqual(step3.x, 0) // 0.1 + 0.55 = 0.65 -> 0
 }
 
 test("scroll smoothness scales discrete mouse wheel notches") {
@@ -86,11 +86,29 @@ test("scroll smoothness scales discrete mouse wheel notches") {
     expectEqual(clamped.y, -6000)
 }
 
-test("three-finger swipe detector triggers once per swipe with cooldown") {
+test("top edge push requires sustained upward intent and resets on drift or pause") {
+    var push = TopEdgePush()
+    // Single large flick is clamped to maxStep (-45), so it does not cross -75 alone.
+    expect(!push.advance(dx: 0, dy: -120, atTopEdge: true, now: 1.0))
+    // Second upward movement within 0.25s crosses -75 and triggers once.
+    expect(push.advance(dx: 2, dy: -35, atTopEdge: true, now: 1.08))
+    // Counter was reset after trigger.
+    expect(!push.advance(dx: 0, dy: -40, atTopEdge: true, now: 1.12))
+    // Pause longer than 0.25s resets the accumulated push.
+    expect(!push.advance(dx: 0, dy: -45, atTopEdge: true, now: 1.50))
+    // Diagonal movement (|dx| > -dy) resets.
+    expect(!push.advance(dx: -40, dy: -20, atTopEdge: true, now: 1.55))
+    expect(!push.advance(dx: 0, dy: -45, atTopEdge: true, now: 1.60))
+    // Leaving top edge resets.
+    expect(!push.advance(dx: 0, dy: -40, atTopEdge: false, now: 1.65))
+    expect(!push.advance(dx: 0, dy: -45, atTopEdge: true, now: 1.70))
+}
+
+test("three-finger swipe detector triggers once per swipe with cooldown and reset") {
     var detector = ThreeFingerSwipeDetector()
     expect(detector.update(touchCount: 2, x: 0.5, y: 0.5, now: 1.0) == nil)
     expect(detector.update(touchCount: 3, x: 0.5, y: 0.5, now: 1.0) == nil)
-    expect(detector.update(touchCount: 3, x: 0.34, y: 0.51, now: 1.05) == .left)
+    expect(detector.update(touchCount: 3, x: 0.37, y: 0.51, now: 1.05) == .left)
     expect(detector.update(touchCount: 3, x: 0.20, y: 0.51, now: 1.1) == nil, "single trigger per gesture")
     expect(detector.update(touchCount: 0, x: 0, y: 0, now: 1.2) == nil)
     expect(detector.update(touchCount: 3, x: 0.5, y: 0.5, now: 1.25) == nil)
@@ -98,22 +116,42 @@ test("three-finger swipe detector triggers once per swipe with cooldown") {
     expect(detector.update(touchCount: 0, x: 0, y: 0, now: 1.5) == nil)
     expect(detector.update(touchCount: 3, x: 0.5, y: 0.5, now: 1.6) == nil)
     expect(detector.update(touchCount: 3, x: 0.7, y: 0.5, now: 1.65) == .right)
-    expect(detector.update(touchCount: 0, x: 0, y: 0, now: 2.1) == nil)
-    expect(detector.update(touchCount: 3, x: 0.5, y: 0.5, now: 2.2) == nil)
-    expect(detector.update(touchCount: 3, x: 0.51, y: 0.68, now: 2.25) == .up)
+    expect(detector.update(touchCount: 0, x: 0, y: 0, now: 2.0) == nil)
+    expect(detector.update(touchCount: 3, x: 0.5, y: 0.5, now: 2.1) == nil)
+    expect(detector.update(touchCount: 3, x: 0.51, y: 0.65, now: 2.15) == .up)
+    expect(detector.update(touchCount: 0, x: 0, y: 0, now: 2.4) == nil)
+    expect(detector.update(touchCount: 3, x: 0.5, y: 0.6, now: 2.55) == nil)
+    expect(detector.update(touchCount: 3, x: 0.51, y: 0.45, now: 2.6) == .down)
+    // Stale touch gap (> 0.25s) resets anchor without emitting a phantom swipe.
+    expect(detector.update(touchCount: 3, x: 0.8, y: 0.45, now: 3.0) == nil)
 }
 
-test("three-finger swipe sequences map actions accurately") {
-    expectEqual(swipeKeySequence(direction: .left, horizontalAction: .desktops, upEnabled: true),
+test("three-finger swipe shortcut actions and fallback sequences map accurately") {
+    expectEqual(swipeShortcutAction(direction: .left, horizontalAction: .desktops, upEnabled: true, downEnabled: true), "desktopNext")
+    expectEqual(swipeShortcutAction(direction: .right, horizontalAction: .desktops, upEnabled: true, downEnabled: true), "desktopPrev")
+    expectEqual(swipeShortcutAction(direction: .left, horizontalAction: .switchApps, upEnabled: true, downEnabled: true), "switchAppNext")
+    expectEqual(swipeShortcutAction(direction: .right, horizontalAction: .switchApps, upEnabled: true, downEnabled: true), "switchAppPrev")
+    expectEqual(swipeShortcutAction(direction: .left, horizontalAction: .browserHistory, upEnabled: true, downEnabled: true), "browserForward")
+    expectEqual(swipeShortcutAction(direction: .right, horizontalAction: .browserHistory, upEnabled: true, downEnabled: true), "browserBack")
+    expectEqual(swipeShortcutAction(direction: .up, horizontalAction: .off, upEnabled: true, downEnabled: false), "taskView")
+    expectEqual(swipeShortcutAction(direction: .down, horizontalAction: .off, upEnabled: false, downEnabled: true), "showDesktop")
+    expect(swipeShortcutAction(direction: .up, horizontalAction: .desktops, upEnabled: false, downEnabled: true) == nil)
+    expect(swipeShortcutAction(direction: .down, horizontalAction: .desktops, upEnabled: true, downEnabled: false) == nil)
+    expect(swipeShortcutAction(direction: .left, horizontalAction: .off, upEnabled: true, downEnabled: true) == nil)
+
+    expectEqual(swipeKeySequence(direction: .left, horizontalAction: .desktops, upEnabled: true, downEnabled: true),
                 [key(0x1d, true), key(0x15b, true), key(0x14d, true), key(0x14d, false), key(0x15b, false), key(0x1d, false)])
-    expectEqual(swipeKeySequence(direction: .right, horizontalAction: .switchApps, upEnabled: true),
+    expectEqual(swipeKeySequence(direction: .right, horizontalAction: .switchApps, upEnabled: true, downEnabled: true),
                 [key(0x38, true), key(0x2a, true), key(0x0f, true), key(0x0f, false), key(0x2a, false), key(0x38, false)])
-    expectEqual(swipeKeySequence(direction: .left, horizontalAction: .browserHistory, upEnabled: true),
+    expectEqual(swipeKeySequence(direction: .left, horizontalAction: .browserHistory, upEnabled: true, downEnabled: true),
                 [key(0x38, true), key(0x14d, true), key(0x14d, false), key(0x38, false)])
-    expectEqual(swipeKeySequence(direction: .up, horizontalAction: .off, upEnabled: true),
+    expectEqual(swipeKeySequence(direction: .up, horizontalAction: .off, upEnabled: true, downEnabled: true),
                 [key(0x15b, true), key(0x0f, true), key(0x0f, false), key(0x15b, false)])
-    expectEqual(swipeKeySequence(direction: .up, horizontalAction: .desktops, upEnabled: false), [])
-    expectEqual(swipeKeySequence(direction: .left, horizontalAction: .off, upEnabled: true), [])
+    expectEqual(swipeKeySequence(direction: .down, horizontalAction: .off, upEnabled: true, downEnabled: true),
+                [key(0x15b, true), key(0x20, true), key(0x20, false), key(0x15b, false)])
+    expectEqual(swipeKeySequence(direction: .up, horizontalAction: .desktops, upEnabled: false, downEnabled: true), [])
+    expectEqual(swipeKeySequence(direction: .down, horizontalAction: .desktops, upEnabled: true, downEnabled: false), [])
+    expectEqual(swipeKeySequence(direction: .left, horizontalAction: .off, upEnabled: true, downEnabled: true), [])
 }
 
 // MARK: - Keyboard

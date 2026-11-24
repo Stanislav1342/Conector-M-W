@@ -1,5 +1,6 @@
 import AppKit
 import CryptoKit
+import Darwin
 import Security
 
 final class Pin: NSObject, URLSessionDelegate, @unchecked Sendable {
@@ -151,16 +152,18 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
     var inputState: Bool?
     var attemptedTap = false
     var lastInputCheck = Date.distantPast
-    var edgePush: Int32 = 0
-    var lastEdgePush = Date.distantPast
+    var topEdgePush = TopEdgePush()
     let log = Diagnostics.shared
     let profiles = Profiles()
     let controlSettings = ControlSettings()
     let cue = HandoffCue()
     var keyboard = RemoteKeyboard(commandIsControl: true)
     var pointer = PointerMotion(speed: 1)
-    var scrollMotion = ScrollMotion(smoothness: 0.6)
+    var scrollMotion = ScrollMotion(smoothness: 1.0)
     var swipeDetector = ThreeFingerSwipeDetector()
+    var receiverSupportsShortcuts = false
+    var backgroundCursorEnabled = false
+    private static let gestureEventTypes: Set<UInt32> = [18, 19, 20, 29, 30, 31, 32, 33, 34, 37, 38]
     var capturedBounds = CGRect.zero
     var lastWarp = Date.distantPast
     var lastActivateAttempt = Date.distantPast
@@ -185,6 +188,8 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
         log.record("startup version=\(version) os=\(ProcessInfo.processInfo.operatingSystemVersionString)")
+        backgroundCursorEnabled = enableBackgroundCursorControl()
+        log.record("background cursor control=\(backgroundCursorEnabled)")
         installMainMenu()
         window = ConnectionWindow(owner: self)
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -471,6 +476,7 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
                     self.connectionFailed(.failure(.badServerResponse))
                     return
                 }
+                self.receiverSupportsShortcuts = capabilities?["shortcut"] == "1"
                 let wake = WakeTarget(mac: capabilities?["mac"] ?? "", broadcast: capabilities?["broadcast"] ?? "")
                 self.channel = stream
                 stream.onMessage = { [weak self, weak stream] event in
@@ -706,13 +712,17 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             if let reconnect, controlSettings.autoConnect { beginConnection(reconnect) }
         }
         channel?.heartbeat(now: now, capturing: remote)
-        if remote, (!cursorHidden || !cursorDetached), now.timeIntervalSince(lastActivateAttempt) >= 0.1 {
+        if remote, (!NSApp.isActive || !cursorHidden || !cursorDetached), now.timeIntervalSince(lastActivateAttempt) >= 0.15 {
             lastActivateAttempt = now
             if !NSApp.isActive {
                 showCaptureAnchor()
                 NSApp.activate(ignoringOtherApps: true)
             }
-            updateRemoteCursor()
+            if !cursorDetached || !NSApp.isActive {
+                reinforceRemoteCursor()
+            } else {
+                updateRemoteCursor()
+            }
         }
         if now.timeIntervalSince(lastInputCheck) >= 1 {
             lastInputCheck = now
@@ -799,19 +809,35 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         let types: [CGEventType] = [.mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged,
                                     .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp,
                                     .otherMouseDown, .otherMouseUp, .scrollWheel, .keyDown, .keyUp, .flagsChanged]
-        var mask = types.reduce(CGEventMask(0)) { $0 | (1 << $1.rawValue) }
-        mask |= CGEventMask(1) << 29 // NSEventTypeGesture (trackpad multi-finger touches)
-        guard let port = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap,
-                                           options: .defaultTap, eventsOfInterest: mask,
-                                           callback: { _, type, event, context in
-            guard let context else { return Unmanaged.passUnretained(event) }
-            return Unmanaged<ConectorApp>.fromOpaque(context).takeUnretainedValue().handle(type, event)
-        }, userInfo: Unmanaged.passUnretained(self).toOpaque()) else { return false }
+        let baseMask = types.reduce(CGEventMask(0)) { $0 | (1 << $1.rawValue) }
+        let fullMask = Self.gestureEventTypes.reduce(baseMask) { $0 | (CGEventMask(1) << UInt64($1)) }
+        let attempts: [(CGEventTapLocation, CGEventMask, String)] = [
+            (.cghidEventTap, fullMask, "hid-full"),
+            (.cgSessionEventTap, fullMask, "session-full"),
+            (.cgSessionEventTap, baseMask | (CGEventMask(1) << 29), "session-basic"),
+        ]
+        var createdPort: CFMachPort?
+        var createdMode = ""
+        let userInfo = Unmanaged.passUnretained(self).toOpaque()
+        for (location, mask, mode) in attempts {
+            if let port = CGEvent.tapCreate(tap: location, place: .headInsertEventTap,
+                                            options: .defaultTap, eventsOfInterest: mask,
+                                            callback: { _, type, event, context in
+                guard let context else { return Unmanaged.passUnretained(event) }
+                return Unmanaged<ConectorApp>.fromOpaque(context).takeUnretainedValue().handle(type, event)
+            }, userInfo: userInfo) {
+                createdPort = port
+                createdMode = mode
+                break
+            }
+        }
+        guard let port = createdPort else { return false }
         let source = CFMachPortCreateRunLoopSource(nil, port, 0)
         tap = port
         tapSource = source
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: port, enable: true)
+        log.record("input tap mode=\(createdMode)")
         return true
     }
 
@@ -831,7 +857,8 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         paused = false
         ready = false
         sending = false
-        edgePush = 0
+        receiverSupportsShortcuts = false
+        topEdgePush.reset()
         lastSentAwake = nil
         pending.removeAll()
         localButtons.removeAll()
@@ -891,13 +918,13 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
     func leave(reason: String) {
         guard remote else { return }
         remote = false
-        edgePush = 0
+        topEdgePush.reset()
         swipeDetector.reset()
         if handoffConfirmed && controlSettings.animate { cue.show(at: entry, entering: false) }
         handoffConfirmed = false
         pending = [Input(kind: "release")]
         captureAnchor?.orderOut(nil)
-        if cursorDetached { CGAssociateMouseAndMouseCursorPosition(1) }
+        CGAssociateMouseAndMouseCursorPosition(1)
         if cursorHidden { CGDisplayShowCursor(CGMainDisplayID()) }
         cursorDetached = false
         cursorHidden = false
@@ -914,6 +941,25 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
     func applicationDidBecomeActive(_ notification: Notification) {
         if window != nil { refreshPermissions() }
         updateRemoteCursor()
+    }
+
+    func applicationDidResignActive(_ notification: Notification) {
+        guard remote else { return }
+        cursorDetached = false
+        reinforceRemoteCursor()
+    }
+
+    func enableBackgroundCursorControl() -> Bool {
+        typealias DefaultConnFn = @convention(c) () -> Int32
+        typealias SetPropFn = @convention(c) (Int32, Int32, CFString, CFTypeRef) -> CGError
+        let rtldDefault = UnsafeMutableRawPointer(bitPattern: -2)
+        guard let connSym = dlsym(rtldDefault, "_CGSDefaultConnection"),
+              let propSym = dlsym(rtldDefault, "CGSSetConnectionProperty") else {
+            return false
+        }
+        let cid = unsafeBitCast(connSym, to: DefaultConnFn.self)()
+        let setProp = unsafeBitCast(propSym, to: SetPropFn.self)
+        return setProp(cid, cid, "SetsCursorInBackground" as CFString, kCFBooleanTrue) == .success
     }
 
     func showCaptureAnchor() {
@@ -937,12 +983,24 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         captureAnchor?.orderFrontRegardless()
     }
 
+    func reinforceRemoteCursor() {
+        guard remote else { return }
+        cursorDetached = CGAssociateMouseAndMouseCursorPosition(0) == .success
+        if cursorHidden {
+            CGDisplayShowCursor(CGMainDisplayID())
+            cursorHidden = false
+        }
+        if backgroundCursorEnabled || NSApp.isActive {
+            cursorHidden = CGDisplayHideCursor(CGMainDisplayID()) == .success
+        }
+    }
+
     func updateRemoteCursor() {
         guard remote else { return }
         if !cursorDetached {
             cursorDetached = CGAssociateMouseAndMouseCursorPosition(0) == .success
         }
-        guard NSApp.isActive else { return }
+        guard backgroundCursorEnabled || NSApp.isActive else { return }
         if !cursorHidden { cursorHidden = CGDisplayHideCursor(CGMainDisplayID()) == .success }
     }
 
@@ -1026,7 +1084,7 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         let dy = Int32(clamping: event.getIntegerValueField(.mouseEventDeltaY))
         let button = UInt16(clamping: event.getIntegerValueField(.mouseEventButtonNumber))
         if !remote {
-            if type.rawValue == 29 { return original }
+            if Self.gestureEventTypes.contains(type.rawValue) { return original }
             switch type {
             case .leftMouseDown, .rightMouseDown, .otherMouseDown: localButtons.insert(button)
             case .leftMouseUp, .rightMouseUp, .otherMouseUp: localButtons.remove(button)
@@ -1036,23 +1094,17 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             }
             guard type == .mouseMoved else { return original }
             let heldModifiers: CGEventFlags = [.maskShift, .maskControl, .maskAlternate, .maskCommand]
-            guard ready, pending.isEmpty, dy < 0, abs(dx) <= -dy, localButtons.isEmpty, localKeys.isEmpty,
+            guard ready, pending.isEmpty, localButtons.isEmpty, localKeys.isEmpty,
                   event.flags.intersection(heldModifiers).isEmpty else {
-                edgePush = 0
+                topEdgePush.reset()
                 return original
             }
             let bounds = CGDisplayBounds(CGGetOnlineBuiltInDisplay())
-            guard bounds.width > 0, event.location.y >= bounds.minY - 1, event.location.y <= bounds.minY + 1,
-                  event.location.x >= bounds.minX, event.location.x < bounds.maxX else {
-                edgePush = 0
+            let atTopEdge = bounds.width > 0 && event.location.y >= bounds.minY - 1 && event.location.y <= bounds.minY + 1 &&
+                            event.location.x >= bounds.minX && event.location.x < bounds.maxX
+            guard topEdgePush.advance(dx: dx, dy: dy, atTopEdge: atTopEdge, now: Date().timeIntervalSinceReferenceDate) else {
                 return original
             }
-            let now = Date()
-            if now.timeIntervalSince(lastEdgePush) > 0.25 { edgePush = 0 }
-            lastEdgePush = now
-            edgePush += max(-100, dy)
-            guard edgePush <= -36 else { return original }
-            edgePush = 0
             remote = true
             captureID &+= 1
             captureFrames = 0
@@ -1098,16 +1150,32 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             return nil
         }
         if type.rawValue == 29 {
-            let touches = NSEvent(cgEvent: event)?.touches(matching: .touching, in: nil) ?? []
-            let count = touches.count
-            let avgX = count > 0 ? touches.reduce(0.0) { $0 + $1.normalizedPosition.x } / Double(count) : 0
-            let avgY = count > 0 ? touches.reduce(0.0) { $0 + $1.normalizedPosition.y } / Double(count) : 0
-            if let direction = swipeDetector.update(touchCount: count, x: avgX, y: avgY, now: Date().timeIntervalSinceReferenceDate) {
-                let sequence = swipeKeySequence(direction: direction,
-                                                horizontalAction: controlSettings.threeFingerSwipeAction,
-                                                upEnabled: controlSettings.threeFingerSwipeUp)
-                if !sequence.isEmpty { pending.append(contentsOf: sequence) }
+            if let nsEvent = NSEvent(cgEvent: event), !nsEvent.touches(matching: .any, in: nil).isEmpty {
+                let touches = nsEvent.touches(matching: .touching, in: nil)
+                let count = touches.count
+                let avgX = count > 0 ? touches.reduce(0.0) { $0 + $1.normalizedPosition.x } / Double(count) : 0
+                let avgY = count > 0 ? touches.reduce(0.0) { $0 + $1.normalizedPosition.y } / Double(count) : 0
+                if let direction = swipeDetector.update(touchCount: count, x: avgX, y: avgY, now: Date().timeIntervalSinceReferenceDate) {
+                    if receiverSupportsShortcuts {
+                        if let action = swipeShortcutAction(direction: direction,
+                                                            horizontalAction: controlSettings.threeFingerSwipeAction,
+                                                            upEnabled: controlSettings.threeFingerSwipeUp,
+                                                            downEnabled: controlSettings.threeFingerSwipeDown) {
+                            channel?.sendShortcut(action, capture: captureID)
+                            log.record("swipe \(direction) -> \(action)")
+                        }
+                    } else {
+                        let sequence = swipeKeySequence(direction: direction,
+                                                        horizontalAction: controlSettings.threeFingerSwipeAction,
+                                                        upEnabled: controlSettings.threeFingerSwipeUp,
+                                                        downEnabled: controlSettings.threeFingerSwipeDown)
+                        if !sequence.isEmpty { pending.append(contentsOf: sequence) }
+                    }
+                }
             }
+            return nil
+        }
+        if Self.gestureEventTypes.contains(type.rawValue) {
             return nil
         }
         switch type {
@@ -1117,8 +1185,10 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             if !recentWarp || max(abs(Int64(dx)), abs(Int64(dy))) < 120 {
                 enqueueMotion(x: dx, y: dy)
             }
-            if !cursorDetached && !capturedBounds.insetBy(dx: 24, dy: 24).contains(event.location) && !recentWarp {
+            let center = CGPoint(x: capturedBounds.midX, y: capturedBounds.midY)
+            if !recentWarp && (!cursorDetached || abs(event.location.x - center.x) > 4 || abs(event.location.y - center.y) > 4) {
                 warpForCapture()
+                reinforceRemoteCursor()
             }
         case .leftMouseDown, .rightMouseDown, .otherMouseDown, .leftMouseUp, .rightMouseUp, .otherMouseUp:
             if button <= 2 {
@@ -1127,12 +1197,17 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             }
         case .scrollWheel:
             let continuous = event.getIntegerValueField(.scrollWheelEventIsContinuous) != 0
-            let rawX = continuous
-                ? event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2)
-                : Double(event.getIntegerValueField(.scrollWheelEventDeltaAxis2))
-            let rawY = continuous
-                ? event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1)
-                : Double(event.getIntegerValueField(.scrollWheelEventDeltaAxis1))
+            let rawX: Double
+            let rawY: Double
+            if continuous {
+                let ptX = Double(event.getIntegerValueField(.scrollWheelEventPointDeltaAxis2))
+                let ptY = Double(event.getIntegerValueField(.scrollWheelEventPointDeltaAxis1))
+                rawX = ptX != 0 ? ptX : event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2) * 10.0
+                rawY = ptY != 0 ? ptY : event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1) * 10.0
+            } else {
+                rawX = Double(event.getIntegerValueField(.scrollWheelEventDeltaAxis2))
+                rawY = Double(event.getIntegerValueField(.scrollWheelEventDeltaAxis1))
+            }
             enqueueScroll(x: -rawX, y: rawY, continuous: continuous)
         case .keyDown, .keyUp, .flagsChanged:
             let down = type == .flagsChanged ? event.flags.rawValue & (modifierMasks[key] ?? 0) != 0 : type == .keyDown

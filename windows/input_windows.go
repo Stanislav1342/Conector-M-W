@@ -104,6 +104,50 @@ func inject(i *input) error {
 	return nil
 }
 
+func injectBatch(inputs []input) error {
+	if len(inputs) == 0 {
+		return nil
+	}
+	count, _, err := sendInput.Call(uintptr(len(inputs)), uintptr(unsafe.Pointer(&inputs[0])), unsafe.Sizeof(inputs[0]))
+	if int(count) != len(inputs) {
+		return fmt.Errorf("SendInput batch failed (%d/%d): %v", count, len(inputs), err)
+	}
+	return nil
+}
+
+func sendShortcut(action string) error {
+	keys, ok := shortcutCombo(action)
+	if !ok {
+		return nil
+	}
+	inputs := make([]input, 0, len(keys)*2)
+	for _, sk := range keys {
+		var entry input
+		entry.kind = 1
+		k := (*keyboardInput)(unsafe.Pointer(&entry.mouse))
+		k.virtualKey = sk.vk
+		k.scanCode = sk.scan
+		if sk.extended {
+			k.flags = 1
+		}
+		inputs = append(inputs, entry)
+	}
+	for idx := len(keys) - 1; idx >= 0; idx-- {
+		sk := keys[idx]
+		var entry input
+		entry.kind = 1
+		k := (*keyboardInput)(unsafe.Pointer(&entry.mouse))
+		k.virtualKey = sk.vk
+		k.scanCode = sk.scan
+		k.flags = 2
+		if sk.extended {
+			k.flags |= 1
+		}
+		inputs = append(inputs, entry)
+	}
+	return injectBatch(inputs)
+}
+
 func moveCursor(x, y int32) error {
 	ok, _, err := setCursorPos.Call(uintptr(x), uintptr(y))
 	if ok == 0 {

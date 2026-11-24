@@ -20,6 +20,7 @@ type inputFrame struct {
 	Clipboard string `json:"clipboard,omitempty"`
 	Image     string `json:"image,omitempty"`
 	Awake     *bool  `json:"awake,omitempty"`
+	Action    string `json:"action,omitempty"`
 }
 
 type streamMessage struct {
@@ -162,6 +163,18 @@ func inputStreamContext(ctx context.Context, r *receiver, control *sync.Mutex, t
 					if *frame.Awake && !prev {
 						pulseKeepAwake()
 					}
+				}
+				continue
+			case "shortcut":
+				if capture != 0 && frame.Capture == capture && validShortcutAction(frame.Action) {
+					r.mu.Lock()
+					if !r.stopped {
+						r.last = time.Now()
+						if err := sendShortcut(frame.Action); err != nil {
+							log.Printf("stream shortcut %s: %v", frame.Action, err)
+						}
+					}
+					r.mu.Unlock()
 				}
 				continue
 			}

@@ -20,6 +20,12 @@ struct AwakeFrame: Encodable {
     let awake: Bool
 }
 
+struct ShortcutFrame: Encodable {
+    let type = "shortcut"
+    let capture: UInt64
+    let action: String
+}
+
 struct ChannelMessage: Decodable {
     let type: String
     let capture: UInt64?
@@ -137,6 +143,18 @@ final class InputChannel {
 
     func sendAwake(_ awake: Bool) {
         guard !closed, let payload = try? JSONEncoder().encode(AwakeFrame(awake: awake)) else { return }
+        task.send(.data(payload)) { [weak self] error in
+            DispatchQueue.main.async {
+                guard let self, !self.closed else { return }
+                if let error {
+                    self.fail(.failure((error as? URLError)?.code ?? .networkConnectionLost))
+                }
+            }
+        }
+    }
+
+    func sendShortcut(_ action: String, capture: UInt64) {
+        guard !closed, let payload = try? JSONEncoder().encode(ShortcutFrame(capture: capture, action: action)) else { return }
         task.send(.data(payload)) { [weak self] error in
             DispatchQueue.main.async {
                 guard let self, !self.closed else { return }
