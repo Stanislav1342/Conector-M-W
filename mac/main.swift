@@ -185,11 +185,8 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
     var lastWarp = Date.distantPast
     var lastActivateAttempt = Date.distantPast
     var lastReinforce = Date.distantPast
-    var lastDragProbe = Date.distantPast
-    var dragStartChangeCount = NSPasteboard(name: .drag).changeCount
-    var dragStartedLeftOfRight = false
-    var pendingDropHide: DispatchWorkItem?
-    var statusItemDropView: StatusItemDropView?
+    var pendingFinderSendURLs: [URL] = []
+    var cachedTransferredFiles: [String: URL] = [:]
     var lastReceivedFiles: [URL] = []
     var showLastReceivedItem: NSMenuItem!
     var offeredWindowsFiles: [OfferedFile] = []
@@ -252,21 +249,8 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         menu.addItem(menuItem("Скопировать журнал", action: #selector(copyDiagnostics)))
         menu.addItem(menuItem("Выйти из Conector-M-W", action: #selector(quit)))
         item.menu = menu
-
-        if let button = item.button {
-            let dropView = StatusItemDropView(frame: button.bounds)
-            dropView.autoresizingMask = [.width, .height]
-            dropView.isHidden = true
-            dropView.onDropFiles = { [weak self] urls in
-                self?.sendFilesToWindows(urls, destination: "downloads")
-            }
-            button.addSubview(dropView)
-            statusItemDropView = dropView
-        }
-
-        fileDropBar.onDrop = { [weak self] urls in
-            self?.sendFilesToWindows(urls, destination: "downloads")
-        }
+        NSApp.servicesProvider = self
+        QuickActionInstaller.installIfNeeded()
 
         timer = Timer(timeInterval: 0.006, repeats: true) { [weak self] _ in self?.tick() }
         if let timer {
@@ -280,9 +264,21 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         discovery.didChange = { [weak self] peers in
             guard let self else { return }
             self.window.updateNearby(peers.count)
-            if self.connection == nil, let reconnect = self.reconnect,
-               peers.contains(where: { $0.fingerprint == reconnect.fingerprint }) {
-                self.retryAt = Date()
+            if let reconnect = self.reconnect,
+               let peer = peers.first(where: { $0.fingerprint == reconnect.fingerprint }) {
+                let updated = reconnect.atHost(peer.host)
+                self.reconnect = updated
+                if self.connection == nil {
+                    self.window.updateAddress(peer.host)
+                    self.retryAt = Date()
+                } else if !self.linked, self.connection?.url.host != peer.host {
+                    let savedPaused = self.paused || self.reconnectPaused
+                    self.stop()
+                    self.reconnect = updated
+                    self.reconnectPaused = savedPaused
+                    self.window.updateAddress(peer.host)
+                    self.retryAt = Date().addingTimeInterval(0.1)
+                }
             }
         }
         if let profile = profiles.last, selectProfile(profile), controlSettings.autoConnect {
@@ -308,8 +304,17 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             self?.handleMacLocked()
         })
         lockObservers.append(workspace.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.handleMacUnlocked()
+            self?.handleMacWake()
         })
+    }
+
+    func handleMacWake() {
+        handleMacUnlocked()
+        discovery.restart()
+        if connection == nil, releasing == nil, reconnect != nil, controlSettings.autoConnect {
+            retryDelay = 0.8
+            retryAt = Date().addingTimeInterval(0.8)
+        }
     }
 
     func handleMacLocked() {
@@ -398,6 +403,33 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         showWindow()
         return false
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        handleFinderSendRequest(urls)
+    }
+
+    @objc func sendFilesFromService(_ pboard: NSPasteboard, userData: String?, error: AutoreleasingUnsafeMutablePointer<NSString?>) {
+        let urls = extractDraggedFileURLs(from: pboard)
+        guard !urls.isEmpty else {
+            error.pointee = "Не найдены файлы для отправки" as NSString
+            return
+        }
+        handleFinderSendRequest(urls)
+    }
+
+    private func handleFinderSendRequest(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        if linked && receiverSupportsFiles {
+            prepareAndSendToWindows(urls)
+        } else {
+            pendingFinderSendURLs = urls
+            fileDropBar.showStatus("Подключаемся к Windows — отправим после соединения…",
+                                   on: builtInScreen(), duration: 3.5)
+            if connection == nil, releasing == nil, let reconnect {
+                beginConnection(reconnect)
+            }
+        }
     }
 
     @objc func showWindow() {
@@ -602,10 +634,16 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             log.record("keychain save failed code=\((error as NSError).code)")
             window.notice = "Подключение работает. Связка ключей не сохранила данные для следующего запуска."
         }
+        if !pendingFinderSendURLs.isEmpty && receiverSupportsFiles {
+            let queued = pendingFinderSendURLs
+            pendingFinderSendURLs.removeAll()
+            prepareAndSendToWindows(queued)
+        }
     }
 
     func connectionFailed(_ result: Response) {
         log.record("connection lost \(result.description)")
+        let failedHost = connection?.url.host
         let wasPaused = paused || reconnectPaused
         stop()
         switch result {
@@ -619,8 +657,15 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             }
         case .failure(.timedOut), .failure(.cannotConnectToHost), .failure(.notConnectedToInternet),
              .failure(.networkConnectionLost), .failure(.cannotFindHost), .http(409):
-            if reconnect != nil && controlSettings.autoConnect {
+            if let saved = reconnect, controlSettings.autoConnect {
                 reconnectPaused = wasPaused
+                if let peer = discovery.computers.first(where: { $0.fingerprint == saved.fingerprint }),
+                   peer.host != failedHost {
+                    reconnect = saved.atHost(peer.host)
+                    window.updateAddress(peer.host)
+                    retryAt = Date().addingTimeInterval(0.3)
+                    return
+                }
                 retryAt = Date().addingTimeInterval(retryDelay)
                 retryDelay = min(retryDelay * 2, 15)
                 display(.error(connectionMessage(result) + " Conector-M-W попробует подключиться снова."))
@@ -639,6 +684,10 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             if controlSettings.animate { cue.show(at: entry, entering: true) }
         case "returned" where remote && message.capture == captureID:
             leave(reason: "Windows edge")
+        case "layout" where remote && message.capture == captureID:
+            if controlSettings.showLayoutIndicator, let lang = message.text, !lang.isEmpty {
+                fileDropBar.showLayoutBadge(lang, on: builtInScreen())
+            }
         case "clipboard":
             if let text = message.text { applyRemoteClipboard(text) }
         case "clipboardImage":
@@ -795,12 +844,72 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         if remote { leave(reason: "file picker") }
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
-        panel.canChooseDirectories = false
+        panel.canChooseDirectories = true
         panel.allowsMultipleSelection = true
         panel.prompt = "Отправить на Windows"
         NSApp.activate(ignoringOtherApps: true)
         if panel.runModal() == .OK, !panel.urls.isEmpty {
-            sendFilesToWindows(panel.urls, destination: "downloads")
+            prepareAndSendToWindows(panel.urls)
+        }
+    }
+
+    func prepareAndSendToWindows(_ rawURLs: [URL]) {
+        guard linked, receiverSupportsFiles else { return }
+        let candidates = Array(rawURLs.prefix(20))
+        guard !candidates.isEmpty else { return }
+        let hasDir = candidates.contains { url in
+            let resolved = (url as NSURL).filePathURL ?? url
+            var isDir: ObjCBool = false
+            return FileManager.default.fileExists(atPath: resolved.path, isDirectory: &isDir) && isDir.boolValue
+        }
+        if !hasDir {
+            sendFilesToWindows(candidates, destination: "downloads")
+            return
+        }
+        fileDropBar.showProgress("Упаковываем папку в ZIP…", fraction: 0.08, on: builtInScreen())
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let fm = FileManager.default
+            let stagingDir = fm.temporaryDirectory.appendingPathComponent("conector-zip-\(UUID().uuidString)", isDirectory: true)
+            try? fm.createDirectory(at: stagingDir, withIntermediateDirectories: true)
+            var prepared: [URL] = []
+            for raw in candidates {
+                let url = (raw as NSURL).filePathURL ?? raw
+                var isDir: ObjCBool = false
+                guard url.isFileURL, fm.fileExists(atPath: url.path, isDirectory: &isDir) else { continue }
+                if !isDir.boolValue {
+                    prepared.append(url)
+                    continue
+                }
+                let baseName = url.lastPathComponent.isEmpty ? "folder" : url.lastPathComponent
+                let zipURL = FileTransfer.uniqueDestination(in: stagingDir, name: "\(baseName).zip")
+                DispatchQueue.main.async {
+                    self.fileDropBar.showProgress("Упаковываем «\(baseName)» в ZIP…", fraction: 0.12, on: self.builtInScreen())
+                }
+                let proc = Process()
+                proc.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+                proc.arguments = ["-c", "-k", "--sequesterRsrc", "--keepParent", url.path, zipURL.path]
+                proc.standardOutput = Pipe()
+                proc.standardError = Pipe()
+                do {
+                    try proc.run()
+                    proc.waitUntilExit()
+                    if proc.terminationStatus == 0, fm.fileExists(atPath: zipURL.path) {
+                        prepared.append(zipURL)
+                    }
+                } catch {
+                    self.log.record("zip folder failed: \(error.localizedDescription)")
+                }
+            }
+            DispatchQueue.main.async {
+                guard !prepared.isEmpty else {
+                    try? fm.removeItem(at: stagingDir)
+                    self.fileDropBar.showStatus("Не удалось подготовить файлы для отправки",
+                                                on: self.builtInScreen(), duration: 3.0)
+                    return
+                }
+                self.sendFilesToWindows(prepared, destination: "downloads", cleanupDir: stagingDir)
+            }
         }
     }
 
@@ -809,48 +918,77 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         let downloadsDir = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads", isDirectory: true)
         let batch = offeredWindowsFiles
-        fileDropBar.showStatus("Скачиваем \(batch.count == 1 ? batch[0].name : "\(batch.count) файлов") в «Загрузки»…",
-                               on: builtInScreen(), duration: 2.5)
-        downloadBatch(batch, using: transfer, into: downloadsDir) { [weak self] saved, firstError in
-            guard let self else { return }
-            if !saved.isEmpty {
-                self.lastReceivedFiles = saved
-                self.showLastReceivedItem.title = saved.count == 1
-                    ? "Показать в Finder: \(saved[0].lastPathComponent)"
-                    : "Показать в Finder (\(saved.count) файлов)"
-                self.showLastReceivedItem.isHidden = false
-                let text = saved.count == 1
-                    ? "✓ В «Загрузки»: \(saved[0].lastPathComponent) · Показать"
-                    : "✓ В «Загрузки»: \(saved.count) файлов · Показать"
-                self.fileDropBar.showStatus(text, on: self.builtInScreen(), duration: 6.0, revealURLs: saved)
-                self.log.record("downloaded \(saved.count) file(s) from Windows")
-            } else if let firstError {
-                self.fileDropBar.showStatus("Не удалось скачать файл: \(firstError.localizedDescription)",
-                                            on: self.builtInScreen(), duration: 3.0)
-            }
-        }
+        transferBatchFromWindows(batch, using: transfer, into: downloadsDir, logPrefix: "downloaded")
     }
 
     private func downloadBatch(_ files: [OfferedFile], using transfer: FileTransfer, into directory: URL,
-                               index: Int = 0, saved: [URL] = [], firstError: Error? = nil,
+                               onProgress: @escaping (Int64, Int64, Double) -> Void,
                                completion: @escaping ([URL], Error?) -> Void) {
-        if index >= files.count {
-            completion(saved, firstError)
-            return
+        let totalExpected = max(Int64(1), files.reduce(Int64(0)) { $0 + max(0, $1.size) })
+        let start = Date()
+        var perFileBytes = [Int64](repeating: 0, count: files.count)
+        var results = [URL?](repeating: nil, count: files.count)
+        var firstError: Error?
+        var nextIndex = 0
+        var active = 0
+        let maxConcurrent = min(3, files.count)
+        var lastHUDUpdate = Date.distantPast
+        let fm = FileManager.default
+
+        func emitProgress(force: Bool = false) {
+            let now = Date()
+            guard force || now.timeIntervalSince(lastHUDUpdate) >= 0.08 else { return }
+            lastHUDUpdate = now
+            let done = perFileBytes.reduce(Int64(0), +)
+            let elapsed = max(0.05, now.timeIntervalSince(start))
+            onProgress(done, totalExpected, Double(done) / elapsed)
         }
-        transfer.download(file: files[index], into: directory) { [weak self] result in
-            guard let self else { return }
-            var nextSaved = saved
-            var nextErr = firstError
-            switch result {
-            case .success(let url):
-                nextSaved.append(url)
-            case .failure(let error):
-                if nextErr == nil { nextErr = error }
+
+        func pump() {
+            while active < maxConcurrent && nextIndex < files.count {
+                let idx = nextIndex
+                nextIndex += 1
+                active += 1
+                let file = files[idx]
+                if let cached = cachedTransferredFiles[file.id],
+                   let attrs = try? fm.attributesOfItem(atPath: cached.path),
+                   (attrs[.size] as? NSNumber)?.int64Value == file.size {
+                    let destination = FileTransfer.uniqueDestination(in: directory, name: cached.lastPathComponent)
+                    if (try? fm.copyItem(at: cached, to: destination)) != nil {
+                        perFileBytes[idx] = file.size
+                        results[idx] = destination
+                        cachedTransferredFiles[file.id] = destination
+                        active -= 1
+                        emitProgress(force: true)
+                        continue
+                    }
+                }
+                transfer.download(file: file, into: directory, onProgress: { written, _ in
+                    perFileBytes[idx] = min(max(0, file.size), written)
+                    emitProgress()
+                }) { result in
+                    switch result {
+                    case .success(let url):
+                        perFileBytes[idx] = max(0, file.size)
+                        results[idx] = url
+                        self.cachedTransferredFiles[file.id] = url
+                    case .failure(let error):
+                        if firstError == nil { firstError = error }
+                    }
+                    active -= 1
+                    emitProgress(force: true)
+                    if active == 0 && nextIndex >= files.count {
+                        completion(results.compactMap { $0 }, firstError)
+                    } else {
+                        pump()
+                    }
+                }
             }
-            self.downloadBatch(files, using: transfer, into: directory, index: index + 1,
-                               saved: nextSaved, firstError: nextErr, completion: completion)
+            if active == 0 && nextIndex >= files.count {
+                completion(results.compactMap { $0 }, firstError)
+            }
         }
+        pump()
     }
 
     private func filterRegularFiles(_ urls: [URL], maxBytes: Int64 = 512 * 1024 * 1024,
@@ -870,24 +1008,38 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         return valid
     }
 
-    func sendFilesToWindows(_ urls: [URL], destination: String?, setClipboard: Bool = true, silent: Bool = false) {
-        guard linked, receiverSupportsFiles, let transfer = fileTransfer else { return }
+    func sendFilesToWindows(_ urls: [URL], destination: String?, setClipboard: Bool = true,
+                            silent: Bool = false, cleanupDir: URL? = nil) {
+        guard linked, receiverSupportsFiles, let transfer = fileTransfer else {
+            if let cleanupDir { try? FileManager.default.removeItem(at: cleanupDir) }
+            return
+        }
         let items = filterRegularFiles(urls)
         guard items.count == urls.prefix(20).count, !items.isEmpty else {
+            if let cleanupDir { try? FileManager.default.removeItem(at: cleanupDir) }
             if !silent {
-                fileDropBar.showStatus("Можно отправлять только файлы (без папок, до 512 МБ)",
+                fileDropBar.showStatus("Можно отправлять только файлы и папки до 512 МБ",
                                        on: builtInScreen(), duration: 2.8)
             }
             return
         }
         let dest = destination ?? "downloads"
         let batchID = UUID().uuidString
+        let label = items.count == 1 ? items[0].url.lastPathComponent : "\(items.count) файлов"
         if !silent {
-            let label = items.count == 1 ? items[0].url.lastPathComponent : "\(items.count) файлов"
-            fileDropBar.showStatus("Отправляем на Windows: \(label)…", on: builtInScreen(), duration: 2.5)
+            fileDropBar.showProgress("Отправляем на Windows: \(label)…", fraction: 0.03, on: builtInScreen())
         }
-        uploadBatch(items.map(\.url), using: transfer, destination: dest,
-                    setClipboard: setClipboard, batchID: batchID) { [weak self] uploaded, firstError in
+        uploadBatch(items, using: transfer, destination: dest,
+                    setClipboard: setClipboard, batchID: batchID, onProgress: { [weak self] done, total, speed in
+            guard let self, !silent else { return }
+            let pct = Int((Double(done) / Double(max(1, total)) * 100.0).rounded())
+            let speedStr = FileTransfer.formatSpeed(speed)
+            let suffix = speedStr.isEmpty ? "\(pct) %" : "\(pct) % · \(speedStr)"
+            self.fileDropBar.showProgress("Отправляем: \(label) · \(suffix)",
+                                          fraction: Double(done) / Double(max(1, total)),
+                                          on: self.builtInScreen())
+        }) { [weak self] uploaded, firstError in
+            if let cleanupDir { try? FileManager.default.removeItem(at: cleanupDir) }
             guard let self else { return }
             if !uploaded.isEmpty {
                 self.log.record("uploaded \(uploaded.count) file(s) dest=\(dest)")
@@ -907,30 +1059,58 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func uploadBatch(_ urls: [URL], using transfer: FileTransfer, destination: String,
-                             setClipboard: Bool, batchID: String, index: Int = 0,
-                             uploaded: [String] = [], firstError: Error? = nil,
+    private func uploadBatch(_ items: [(url: URL, size: Int64, mtime: TimeInterval)], using transfer: FileTransfer,
+                             destination: String, setClipboard: Bool, batchID: String,
+                             onProgress: @escaping (Int64, Int64, Double) -> Void,
                              completion: @escaping ([String], Error?) -> Void) {
-        if index >= urls.count {
-            completion(uploaded, firstError)
-            return
+        let totalExpected = max(Int64(1), items.reduce(Int64(0)) { $0 + max(0, $1.size) })
+        let start = Date()
+        var perFileBytes = [Int64](repeating: 0, count: items.count)
+        var uploadedNames = [String?](repeating: nil, count: items.count)
+        var firstError: Error?
+        var nextIndex = 0
+        var active = 0
+        let maxConcurrent = min(3, items.count)
+        var lastHUDUpdate = Date.distantPast
+
+        func emitProgress(force: Bool = false) {
+            let now = Date()
+            guard force || now.timeIntervalSince(lastHUDUpdate) >= 0.08 else { return }
+            lastHUDUpdate = now
+            let done = perFileBytes.reduce(Int64(0), +)
+            let elapsed = max(0.05, now.timeIntervalSince(start))
+            onProgress(done, totalExpected, Double(done) / elapsed)
         }
-        transfer.upload(fileURL: urls[index], destination: destination,
-                        setClipboard: setClipboard, batchID: batchID) { [weak self] result in
-            guard let self else { return }
-            var nextUploaded = uploaded
-            var nextErr = firstError
-            switch result {
-            case .success(let savedName):
-                nextUploaded.append(savedName)
-            case .failure(let error):
-                if nextErr == nil { nextErr = error }
+
+        func pump() {
+            while active < maxConcurrent && nextIndex < items.count {
+                let idx = nextIndex
+                nextIndex += 1
+                active += 1
+                let item = items[idx]
+                transfer.upload(fileURL: item.url, destination: destination,
+                                setClipboard: setClipboard, batchID: batchID, onProgress: { sent, _ in
+                    perFileBytes[idx] = min(max(0, item.size), sent)
+                    emitProgress()
+                }) { result in
+                    switch result {
+                    case .success(let savedName):
+                        perFileBytes[idx] = max(0, item.size)
+                        uploadedNames[idx] = savedName
+                    case .failure(let error):
+                        if firstError == nil { firstError = error }
+                    }
+                    active -= 1
+                    emitProgress(force: true)
+                    if active == 0 && nextIndex >= items.count {
+                        completion(uploadedNames.compactMap { $0 }, firstError)
+                    } else {
+                        pump()
+                    }
+                }
             }
-            self.uploadBatch(urls, using: transfer, destination: destination,
-                             setClipboard: setClipboard, batchID: batchID,
-                             index: index + 1, uploaded: nextUploaded,
-                             firstError: nextErr, completion: completion)
         }
+        pump()
     }
 
     private func receivedClipboardCacheDirectory() -> URL {
@@ -960,16 +1140,17 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
               receiverSupportsFiles, let transfer = fileTransfer else { return }
         let total = files.reduce(Int64(0)) { $0 + $1.size }
         guard total > 0 else { return }
-        guard total <= 25 * 1024 * 1024 else {
-            if let first = files.first {
+        // Only auto-prefetch tiny clipboard files (<= 2 MB) while cursor is on Mac so Wi-Fi stays free.
+        guard !remote, total <= 2 * 1024 * 1024 else {
+            if let first = files.first, total > 2 * 1024 * 1024 {
                 fileDropBar.showStatus("С Windows доступен файл \(first.name) (\(FileTransfer.formatBytes(total))) — скачайте из меню",
-                                       on: builtInScreen(), duration: 3.5)
+                                       on: builtInScreen(), duration: 3.0)
             }
             return
         }
         let cacheDir = receivedClipboardCacheDirectory()
         pruneOldReceivedFiles(in: cacheDir)
-        downloadBatch(files, using: transfer, into: cacheDir) { [weak self] saved, _ in
+        downloadBatch(files, using: transfer, into: cacheDir, onProgress: { _, _, _ in }) { [weak self] saved, _ in
             guard let self, self.linked, self.offerGeneration == generation, !saved.isEmpty else { return }
             let items = self.filterRegularFiles(saved, maxBytes: 25 * 1024 * 1024)
             let meta = items.map { "\($0.url.path)|\($0.size)|\($0.mtime)" }.sorted().joined(separator: "\n")
@@ -990,19 +1171,34 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         let fm = FileManager.default
         let targetDir = fm.urls(for: .downloadsDirectory, in: .userDomainMask).first
             ?? fm.homeDirectoryForCurrentUser.appendingPathComponent("Downloads", isDirectory: true)
+        transferBatchFromWindows(files, using: transfer, into: targetDir, logPrefix: "received", writeClipboard: true)
+    }
+
+    private func transferBatchFromWindows(_ files: [OfferedFile], using transfer: FileTransfer, into targetDir: URL,
+                                          logPrefix: String, writeClipboard: Bool = false) {
         let label = files.count == 1 ? files[0].name : "\(files.count) файлов"
-        fileDropBar.showStatus("Получаем с Windows: \(label)…", on: builtInScreen(), duration: 2.5)
-        downloadBatch(files, using: transfer, into: targetDir) { [weak self] saved, firstError in
+        fileDropBar.showProgress("Получаем с Windows: \(label)…", fraction: 0.03, on: builtInScreen())
+        downloadBatch(files, using: transfer, into: targetDir, onProgress: { [weak self] done, total, speed in
+            guard let self else { return }
+            let pct = Int((Double(done) / Double(max(1, total)) * 100.0).rounded())
+            let speedStr = FileTransfer.formatSpeed(speed)
+            let suffix = speedStr.isEmpty ? "\(pct) %" : "\(pct) % · \(speedStr)"
+            self.fileDropBar.showProgress("Получаем: \(label) · \(suffix)",
+                                          fraction: Double(done) / Double(max(1, total)),
+                                          on: self.builtInScreen())
+        }) { [weak self] saved, firstError in
             guard let self else { return }
             if !saved.isEmpty {
-                let items = self.filterRegularFiles(saved, maxBytes: 25 * 1024 * 1024)
-                if !items.isEmpty {
-                    let meta = items.map { "\($0.url.path)|\($0.size)|\($0.mtime)" }.sorted().joined(separator: "\n")
-                    self.lastSyncedClipboardHash = self.clipboardHash(kind: "files", payload: Data(meta.utf8))
-                    let pb = NSPasteboard.general
-                    pb.clearContents()
-                    pb.writeObjects(saved as [NSURL])
-                    self.lastClipboardChangeCount = pb.changeCount
+                if writeClipboard {
+                    let items = self.filterRegularFiles(saved, maxBytes: 25 * 1024 * 1024)
+                    if !items.isEmpty {
+                        let meta = items.map { "\($0.url.path)|\($0.size)|\($0.mtime)" }.sorted().joined(separator: "\n")
+                        self.lastSyncedClipboardHash = self.clipboardHash(kind: "files", payload: Data(meta.utf8))
+                        let pb = NSPasteboard.general
+                        pb.clearContents()
+                        pb.writeObjects(saved as [NSURL])
+                        self.lastClipboardChangeCount = pb.changeCount
+                    }
                 }
                 self.lastReceivedFiles = saved
                 self.showLastReceivedItem.title = saved.count == 1
@@ -1013,7 +1209,7 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
                     ? "✓ В «Загрузки»: \(saved[0].lastPathComponent) · Показать"
                     : "✓ В «Загрузки»: \(saved.count) файлов · Показать"
                 self.fileDropBar.showStatus(text, on: self.builtInScreen(), duration: 6.0, revealURLs: saved)
-                self.log.record("received \(saved.count) dropped file(s) from Windows")
+                self.log.record("\(logPrefix) \(saved.count) file(s) from Windows")
             } else if let firstError {
                 self.fileDropBar.showStatus("Ошибка получения файла: \(firstError.localizedDescription)",
                                             on: self.builtInScreen(), duration: 3.5)
@@ -1091,6 +1287,8 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             guard digest != lastSyncedClipboardHash else { return }
             lastSyncedClipboardHash = digest
             sendFilesToWindows(valid.map(\.url), destination: "clipboard", setClipboard: true, silent: true)
+            let label = valid.count == 1 ? valid[0].url.lastPathComponent : "\(valid.count) файлов"
+            fileDropBar.showStatus("✓ В буфер Windows: \(label)", on: builtInScreen(), duration: 1.8)
             return
         }
 
@@ -1235,12 +1433,9 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         receiverSupportsShortcuts = false
         receiverSupportsFiles = false
         offeredWindowsFiles.removeAll()
+        cachedTransferredFiles.removeAll()
         suppressedShortcutKeys.removeAll()
-        pendingDropHide?.cancel()
-        pendingDropHide = nil
-        dragStartedLeftOfRight = false
-        fileDropBar.hideDropZone()
-        statusItemDropView?.isHidden = true
+        fileDropBar.hide()
         if let act = latencyActivity {
             ProcessInfo.processInfo.endActivity(act)
             latencyActivity = nil
@@ -1504,53 +1699,11 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             switch type {
             case .leftMouseDown, .rightMouseDown, .otherMouseDown:
                 localButtons.insert(button)
-                if type == .leftMouseDown {
-                    dragStartChangeCount = NSPasteboard(name: .drag).changeCount
-                    let bounds = CGDisplayBounds(CGGetOnlineBuiltInDisplay())
-                    dragStartedLeftOfRight = bounds.width > 0 && event.location.x < bounds.maxX - 60
-                }
             case .leftMouseUp, .rightMouseUp, .otherMouseUp:
                 localButtons.remove(button)
-                if type == .leftMouseUp { dragStartedLeftOfRight = false }
             case .keyDown: localKeys.insert(key)
             case .keyUp: localKeys.remove(key)
             default: break
-            }
-            if linked, receiverSupportsFiles, controlSettings.fileTransferEnabled {
-                if type == .leftMouseDragged {
-                    let bounds = CGDisplayBounds(CGGetOnlineBuiltInDisplay())
-                    let now = Date()
-                    if now.timeIntervalSince(lastDragProbe) >= 0.05 {
-                        lastDragProbe = now
-                        if NSPasteboard(name: .drag).changeCount != dragStartChangeCount,
-                           dragPasteboardHasFiles() {
-                            pendingDropHide?.cancel()
-                            pendingDropHide = nil
-                            statusItemDropView?.isHidden = false
-                            if dragStartedLeftOfRight,
-                               bounds.width > 0,
-                               event.location.y >= bounds.minY,
-                               event.location.y < bounds.maxY,
-                               event.location.x >= bounds.maxX - 56,
-                               !fileDropBar.isShowingDropZone,
-                               let screen = builtInScreen() {
-                                fileDropBar.showDropZone(nearQuartzY: event.location.y, on: screen)
-                            }
-                        }
-                    }
-                    if fileDropBar.isShowingDropZone, bounds.width > 0, event.location.x < bounds.maxX - 280 {
-                        fileDropBar.hideDropZone()
-                    }
-                } else if type == .leftMouseUp,
-                          fileDropBar.isShowingDropZone || (statusItemDropView?.isHidden == false) {
-                    pendingDropHide?.cancel()
-                    let hideWork = DispatchWorkItem { [weak self] in
-                        self?.fileDropBar.hideDropZone()
-                        self?.statusItemDropView?.isHidden = true
-                    }
-                    pendingDropHide = hideWork
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: hideWork)
-                }
             }
             guard type == .mouseMoved else { return original }
             let heldModifiers: CGEventFlags = [.maskShift, .maskControl, .maskAlternate, .maskCommand]

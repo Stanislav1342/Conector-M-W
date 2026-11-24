@@ -1,8 +1,10 @@
 package main
 
 import (
+	"compress/gzip"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -20,33 +22,68 @@ const (
 	maxFileUploadBytes    int64 = 512 << 20
 	maxClipboardFileBytes int64 = 25 << 20
 	maxClipboardFileCount       = 20
+	maxStoredOfferedFiles       = 128
 )
 
+var copyBufPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 512*1024)
+		return &buf
+	},
+}
+
+func copyWithLargeBuffer(dst io.Writer, src io.Reader) (int64, error) {
+	bufPtr := copyBufPool.Get().(*[]byte)
+	defer copyBufPool.Put(bufPtr)
+	return io.CopyBuffer(dst, src, *bufPtr)
+}
+
+var precompressedExts = map[string]bool{
+	".zip": true, ".7z": true, ".rar": true, ".gz": true, ".tgz": true, ".bz2": true, ".xz": true, ".zst": true,
+	".jpg": true, ".jpeg": true, ".png": true, ".gif": true, ".webp": true, ".heic": true, ".avif": true,
+	".mp4": true, ".mov": true, ".mkv": true, ".avi": true, ".webm": true,
+	".mp3": true, ".m4a": true, ".aac": true, ".ogg": true, ".flac": true,
+	".dmg": true, ".pkg": true, ".whl": true, ".exe": true, ".dll": true,
+}
+
+func shouldGzipFile(name string, size int64) bool {
+	if size < 4096 {
+		return false
+	}
+	return !precompressedExts[strings.ToLower(filepath.Ext(name))]
+}
+
 type offeredFile struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Size int64  `json:"size"`
-	path string
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Size      int64  `json:"size"`
+	path      string
+	mtimeNano int64
+	sourceKey string
 }
 
 type fileStore struct {
 	mu         sync.Mutex
 	files      map[string]offeredFile
+	bySource   map[string]string
+	order      []string
 	batches    map[string][]string
 	batchOrder []string
 }
 
 func newFileStore() *fileStore {
 	return &fileStore{
-		files:   make(map[string]offeredFile),
-		batches: make(map[string][]string),
+		files:    make(map[string]offeredFile),
+		bySource: make(map[string]string),
+		batches:  make(map[string][]string),
 	}
 }
 
 func (s *fileStore) register(paths []string) []offeredFile {
-	next := make(map[string]offeredFile)
 	out := make([]offeredFile, 0, len(paths))
 	seen := make(map[string]bool)
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	for _, rawPath := range paths {
 		if len(out) >= maxClipboardFileCount {
 			break
@@ -60,23 +97,40 @@ func (s *fileStore) register(paths []string) []offeredFile {
 		if err != nil || !info.Mode().IsRegular() || info.Size() < 0 || info.Size() > maxFileUploadBytes {
 			continue
 		}
+		mtimeNano := info.ModTime().UnixNano()
+		sourceKey := fmt.Sprintf("%s|%d|%d", clean, info.Size(), mtimeNano)
+		if existingID, ok := s.bySource[sourceKey]; ok {
+			if existing, exists := s.files[existingID]; exists {
+				out = append(out, existing)
+				continue
+			}
+		}
 		var token [16]byte
 		if _, err := rand.Read(token[:]); err != nil {
 			continue
 		}
 		id := hex.EncodeToString(token[:])
 		entry := offeredFile{
-			ID:   id,
-			Name: sanitizeFilename(filepath.Base(clean)),
-			Size: info.Size(),
-			path: clean,
+			ID:        id,
+			Name:      sanitizeFilename(filepath.Base(clean)),
+			Size:      info.Size(),
+			path:      clean,
+			mtimeNano: mtimeNano,
+			sourceKey: sourceKey,
 		}
-		next[id] = entry
+		s.files[id] = entry
+		s.bySource[sourceKey] = id
+		s.order = append(s.order, id)
+		for len(s.order) > maxStoredOfferedFiles {
+			oldestID := s.order[0]
+			s.order = s.order[1:]
+			if old, ok := s.files[oldestID]; ok {
+				delete(s.bySource, old.sourceKey)
+				delete(s.files, oldestID)
+			}
+		}
 		out = append(out, entry)
 	}
-	s.mu.Lock()
-	s.files = next
-	s.mu.Unlock()
 	return out
 }
 
@@ -275,7 +329,18 @@ func handleFileUpload(token string, clip *clipboardBridge, store *fileStore, res
 			}
 		}()
 
-		written, err := io.Copy(tmp, io.LimitReader(req.Body, maxFileUploadBytes+1))
+		var bodyReader io.Reader = req.Body
+		if strings.EqualFold(strings.TrimSpace(req.Header.Get("Content-Encoding")), "gzip") {
+			gz, err := gzip.NewReader(req.Body)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			defer gz.Close()
+			bodyReader = gz
+		}
+
+		written, err := copyWithLargeBuffer(tmp, io.LimitReader(bodyReader, maxFileUploadBytes+1))
 		if err != nil {
 			log.Printf("file upload copy: %v", err)
 			w.WriteHeader(http.StatusBadRequest)
@@ -357,10 +422,22 @@ func handleFileDownload(token string, store *fileStore) http.HandlerFunc {
 		defer f.Close()
 
 		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
 		w.Header().Set("X-Conector-Filename", url.PathEscape(entry.Name))
+		w.Header().Set("X-Conector-Raw-Size", strconv.FormatInt(info.Size(), 10))
 		w.Header().Set("Cache-Control", "no-store")
+		if strings.Contains(req.Header.Get("Accept-Encoding"), "gzip") && shouldGzipFile(entry.Name, info.Size()) {
+			w.Header().Set("Content-Encoding", "gzip")
+			w.WriteHeader(http.StatusOK)
+			gz, err := gzip.NewWriterLevel(w, gzip.BestSpeed)
+			if err != nil {
+				return
+			}
+			_, _ = copyWithLargeBuffer(gz, f)
+			_ = gz.Close()
+			return
+		}
+		w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
 		w.WriteHeader(http.StatusOK)
-		_, _ = io.Copy(w, f)
+		_, _ = copyWithLargeBuffer(w, f)
 	}
 }

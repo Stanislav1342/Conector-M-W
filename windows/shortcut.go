@@ -1,5 +1,7 @@
 package main
 
+import "fmt"
+
 type shortcutKey struct {
 	vk       uint16
 	scan     uint16
@@ -58,4 +60,38 @@ func validShortcutAction(action string) bool {
 	}
 	_, ok := shortcutCombos[action]
 	return ok
+}
+
+var primaryLangNames = map[uint16]string{
+	0x19: "RU",
+	0x09: "EN",
+	0x22: "UA",
+	0x23: "BY",
+	0x3F: "KZ",
+	0x07: "DE",
+	0x0C: "FR",
+	0x0A: "ES",
+	0x10: "IT",
+	0x15: "PL",
+	0x1F: "TR",
+	0x04: "ZH",
+	0x11: "JA",
+	0x12: "KO",
+	0x0D: "HE",
+	0x2B: "HY",
+	0x37: "KA",
+}
+
+func layoutCodeFromHKL(hkl uintptr) string {
+	if hkl == 0 {
+		return ""
+	}
+	langID := uint16(hkl & 0xFFFF)
+	if langID == 0 {
+		return ""
+	}
+	if name, ok := primaryLangNames[langID&0x03FF]; ok {
+		return name
+	}
+	return fmt.Sprintf("%04X", langID)
 }

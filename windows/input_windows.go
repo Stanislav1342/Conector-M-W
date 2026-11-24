@@ -14,6 +14,19 @@ var setCursorPos = user32.NewProc("SetCursorPos")
 var monitorFromRect = user32.NewProc("MonitorFromRect")
 var getMonitorInfoW = user32.NewProc("GetMonitorInfoW")
 var setThreadDPI = user32.NewProc("SetThreadDpiAwarenessContext")
+var getForegroundWindow = user32.NewProc("GetForegroundWindow")
+var getWindowThreadProcessId = user32.NewProc("GetWindowThreadProcessId")
+var getKeyboardLayout = user32.NewProc("GetKeyboardLayout")
+
+func currentKeyboardLayout() string {
+	hwnd, _, _ := getForegroundWindow.Call()
+	var tid uintptr
+	if hwnd != 0 {
+		tid, _, _ = getWindowThreadProcessId.Call(hwnd, 0)
+	}
+	hkl, _, _ := getKeyboardLayout.Call(tid)
+	return layoutCodeFromHKL(hkl)
+}
 
 func setDPIAware() {
 	user32.NewProc("SetProcessDPIAware").Call()

@@ -97,7 +97,7 @@ func inputStreamWithBridge(ctx context.Context, r *receiver, control *sync.Mutex
 			writeMu.Lock()
 			defer writeMu.Unlock()
 			deadline := 2 * time.Second
-			if message.Type == "clipboardImage" {
+			if message.Type == "clipboardImage" || message.Type == "fileOffer" || message.Type == "fileDrop" {
 				deadline = 5 * time.Second
 			}
 			_ = ws.SetWriteDeadline(time.Now().Add(deadline))
@@ -107,6 +107,8 @@ func inputStreamWithBridge(ctx context.Context, r *receiver, control *sync.Mutex
 			return
 		}
 		var keepAwake atomic.Bool
+		var activeCapture atomic.Uint64
+		defer activeCapture.Store(0)
 		stopDropBar := startDropBar(func(paths []string) {
 			offered := files.register(paths)
 			if len(offered) > 0 {
@@ -115,10 +117,17 @@ func inputStreamWithBridge(ctx context.Context, r *receiver, control *sync.Mutex
 		})
 		defer stopDropBar()
 		pushClipCh := make(chan struct{}, 1)
+		layoutCheckCh := make(chan struct{}, 1)
 		applyClipCh := make(chan clipApplyJob, 8)
 		enqueuePushClipboard := func() {
 			select {
 			case pushClipCh <- struct{}{}:
+			default:
+			}
+		}
+		triggerLayoutCheck := func() {
+			select {
+			case layoutCheckCh <- struct{}{}:
 			default:
 			}
 		}
@@ -142,15 +151,38 @@ func inputStreamWithBridge(ctx context.Context, r *receiver, control *sync.Mutex
 		}
 		go func() {
 			clipTicker := time.NewTicker(250 * time.Millisecond)
+			layoutTicker := time.NewTicker(150 * time.Millisecond)
 			awakeTicker := time.NewTicker(25 * time.Second)
 			defer clipTicker.Stop()
+			defer layoutTicker.Stop()
 			defer awakeTicker.Stop()
+			lastLayout := ""
+			var lastReportedCapture uint64
+			checkLayout := func(force bool) {
+				capID := activeCapture.Load()
+				if capID == 0 {
+					return
+				}
+				lang := currentKeyboardLayout()
+				if lang == "" {
+					return
+				}
+				if force || capID != lastReportedCapture || lang != lastLayout {
+					lastLayout = lang
+					lastReportedCapture = capID
+					_ = write(streamMessage{Type: "layout", Capture: capID, Text: lang})
+				}
+			}
 			for {
 				select {
 				case <-streamCtx.Done():
 					return
 				case <-pushClipCh:
 					pushClipboard()
+				case <-layoutCheckCh:
+					checkLayout(true)
+				case <-layoutTicker.C:
+					checkLayout(false)
 				case <-clipTicker.C:
 					pushClipboard()
 				case <-awakeTicker.C:
@@ -262,6 +294,7 @@ func inputStreamWithBridge(ctx context.Context, r *receiver, control *sync.Mutex
 			if first == "enter" {
 				r.releaseAll()
 				capture = frame.Capture
+				activeCapture.Store(capture)
 			}
 			if frame.Capture != capture {
 				continue
@@ -278,10 +311,12 @@ func inputStreamWithBridge(ctx context.Context, r *receiver, control *sync.Mutex
 					return
 				}
 				capture = 0
+				activeCapture.Store(0)
 			} else if first == "enter" {
 				if write(streamMessage{Type: "entered", Capture: capture}) != nil {
 					return
 				}
+				triggerLayoutCheck()
 			}
 		}
 	}

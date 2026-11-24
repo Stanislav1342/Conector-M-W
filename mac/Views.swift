@@ -510,12 +510,12 @@ private struct SettingsView: View {
                 Toggle("Общий буфер обмена (текст и скриншоты)", isOn: $model.settings.clipboardSync)
             }
             Section {
-                Toggle("Перетаскивание файлов (правый край Mac / нижний край Windows)", isOn: $model.settings.fileTransferEnabled)
-                Toggle("Синхронизировать скопированные файлы через буфер (до 25 МБ)", isOn: $model.settings.clipboardFileSync)
+                Toggle("Быстрая передача файлов (Finder → «Отправить на Windows» и сброс с Windows)", isOn: $model.settings.fileTransferEnabled)
+                Toggle("Файлы через буфер обмена Mac → Windows (⌘+C → Ctrl+V, до 25 МБ)", isOn: $model.settings.clipboardFileSync)
             } header: {
                 Text("Передача файлов")
             } footer: {
-                Text("Переданные файлы сохраняются в папку «Загрузки» на обоих устройствах. На Mac файл также можно перетащить прямо на значок Conector-M-W в строке меню.")
+                Text("Чтобы отправить файл или папку с MacBook, нажмите двумя пальцами по файлу в Finder → «Быстрые действия» (или «Службы») → «Отправить на Windows». Все файлы сохраняются в папку «Загрузки».")
                     .foregroundStyle(.secondary)
             }
             Section("Блокировка и экран") {
@@ -537,6 +537,7 @@ private struct SettingsView: View {
                 Toggle("⌘ Command работает как Ctrl", isOn: $model.settings.commandIsControl)
                 Toggle("Привычные сочетания Mac (текст и скриншот ⌘+Shift+4/5 → Print Screen)", isOn: $model.settings.macShortcuts)
                 Toggle("⌘ + Пробел переключает язык на Windows", isOn: $model.settings.commandSpaceSwitchesLanguage)
+                Toggle("Показывать раскладку клавиатуры Windows (RU / EN)", isOn: $model.settings.showLayoutIndicator)
                 Toggle("⌘ + L блокирует Windows", isOn: $model.settings.commandLLocksWindows)
                 HStack {
                     Text("Курсор и прокрутка как на MacBook")

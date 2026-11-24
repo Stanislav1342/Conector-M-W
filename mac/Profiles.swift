@@ -38,6 +38,10 @@ struct ControlSettings {
         get { defaults.object(forKey: "commandSpaceSwitchesLanguage") as? Bool ?? true }
         set { defaults.set(newValue, forKey: "commandSpaceSwitchesLanguage") }
     }
+    var showLayoutIndicator: Bool {
+        get { defaults.object(forKey: "showLayoutIndicator") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "showLayoutIndicator") }
+    }
     var clipboardSync: Bool {
         get { defaults.object(forKey: "clipboardSync") as? Bool ?? true }
         set { defaults.set(newValue, forKey: "clipboardSync") }

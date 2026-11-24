@@ -26,6 +26,7 @@ var fake struct {
 	awakePulses  int
 	shortcuts    []string
 	dropHandler  func([]string)
+	layout       string
 }
 
 func (e event) send() error {
@@ -72,6 +73,18 @@ func sendShortcut(action string) error {
 	}
 	fake.shortcuts = append(fake.shortcuts, action)
 	return nil
+}
+
+func setFakeLayout(code string) {
+	fake.mu.Lock()
+	fake.layout = code
+	fake.mu.Unlock()
+}
+
+func currentKeyboardLayout() string {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	return fake.layout
 }
 
 func startDropBar(onDrop func([]string)) func() {
@@ -180,6 +193,7 @@ func resetFake(t *testing.T) {
 	fake.awakePulses = 0
 	fake.shortcuts = nil
 	fake.dropHandler = nil
+	fake.layout = ""
 	fake.mu.Unlock()
 }
 

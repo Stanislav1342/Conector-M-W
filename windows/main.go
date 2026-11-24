@@ -317,6 +317,9 @@ func startReceiver(onServerError func(error)) (*receiverService, error) {
 	power := &powerController{lock: lockWindows}
 	power.register(mux, powerToken(token))
 	mux.HandleFunc("/input", func(w http.ResponseWriter, req *http.Request) {
+		rc := http.NewResponseController(w)
+		_ = rc.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_ = rc.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		if req.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
@@ -349,8 +352,10 @@ func startReceiver(onServerError func(error)) (*receiverService, error) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	server := &http.Server{
-		Handler: mux, TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
-		ReadTimeout: 3 * time.Second, WriteTimeout: 3 * time.Second, IdleTimeout: 15 * time.Second,
+		Handler:           mux,
+		TLSConfig:         &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       30 * time.Second,
 	}
 	service := &receiverService{listener: listener, server: server, input: r, invite: invite, cancel: cancel, done: ctx.Done(), discoveryDone: discoveryDone,
 		details: func() string { return connectionDetails(token, fingerprint) }}

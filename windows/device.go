@@ -72,6 +72,9 @@ func (p *pairingInvite) matches(pin string, now time.Time) bool {
 
 func (p *pairingInvite) register(mux *http.ServeMux, token string) {
 	mux.HandleFunc("/pair", func(w http.ResponseWriter, req *http.Request) {
+		rc := http.NewResponseController(w)
+		_ = rc.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_ = rc.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		if req.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
@@ -189,6 +192,9 @@ func keepAdvertising(ctx context.Context, name, fingerprint string) {
 
 func deviceInfo(token string) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
+		rc := http.NewResponseController(w)
+		_ = rc.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_ = rc.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		if req.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return

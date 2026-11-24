@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
@@ -668,5 +669,95 @@ func TestStreamDropBarSendsFileDrop(t *testing.T) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil || string(body) != "from-windows-drop" {
 		t.Fatalf("downloaded = %q, %v", body, err)
+	}
+}
+
+func TestLayoutCodeFromHKLAndStreamPush(t *testing.T) {
+	if got := layoutCodeFromHKL(0x04190419); got != "RU" {
+		t.Fatalf("layout(0x04190419) = %q, want RU", got)
+	}
+	if got := layoutCodeFromHKL(0x04090409); got != "EN" {
+		t.Fatalf("layout(0x04090409) = %q, want EN", got)
+	}
+	if got := layoutCodeFromHKL(0); got != "" {
+		t.Fatalf("layout(0) = %q, want empty", got)
+	}
+
+	h := newStream(t)
+	setFakeLayout("EN")
+	ws := h.connect()
+	h.send(ws, inputFrame{Capture: 7, Events: []event{{Kind: "enter", X: 100}}})
+	if got := h.read(ws); got.Type != "entered" || got.Capture != 7 {
+		t.Fatalf("entered = %+v", got)
+	}
+	if got := h.read(ws); got.Type != "layout" || got.Capture != 7 || got.Text != "EN" {
+		t.Fatalf("initial layout = %+v, want EN", got)
+	}
+	setFakeLayout("RU")
+	if got := h.read(ws); got.Type != "layout" || got.Capture != 7 || got.Text != "RU" {
+		t.Fatalf("changed layout = %+v, want RU", got)
+	}
+}
+
+func TestFileStoreRetainsEntriesAndGzipDownload(t *testing.T) {
+	resetFake(t)
+	dir := t.TempDir()
+	txtPath := filepath.Join(dir, "big.txt")
+	zipPath := filepath.Join(dir, "archive.zip")
+	txtData := bytes.Repeat([]byte("hello conector "), 400) // ~6 KB compressible
+	zipData := bytes.Repeat([]byte("PK\x03\x04"), 1500)
+	if err := os.WriteFile(txtPath, txtData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(zipPath, zipData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	store := newFileStore()
+	first := store.register([]string{txtPath})
+	second := store.register([]string{zipPath})
+	if len(first) != 1 || len(second) != 1 {
+		t.Fatalf("registered = %d, %d", len(first), len(second))
+	}
+	// Earlier registered file must still be downloadable after subsequent register() calls.
+	if _, ok := store.lookup(first[0].ID); !ok {
+		t.Fatal("first file evicted prematurely by second register()")
+	}
+	// Unchanged file must reuse the same ID.
+	again := store.register([]string{txtPath})
+	if len(again) != 1 || again[0].ID != first[0].ID {
+		t.Fatalf("unchanged file ID = %q, want %q", again[0].ID, first[0].ID)
+	}
+
+	srv := httptest.NewServer(handleFileDownload(testToken, store))
+	defer srv.Close()
+
+	// Compressible .txt with Accept-Encoding: gzip should return Content-Encoding: gzip (http.Client auto-decompresses).
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/file/download?id="+first[0].ID, nil)
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.Header.Get("X-Conector-Raw-Size") != fmt.Sprintf("%d", len(txtData)) {
+		t.Fatalf("X-Conector-Raw-Size = %q", resp.Header.Get("X-Conector-Raw-Size"))
+	}
+	gotTxt, err := io.ReadAll(resp.Body)
+	if err != nil || !bytes.Equal(gotTxt, txtData) {
+		t.Fatalf("txt download mismatch len=%d err=%v", len(gotTxt), err)
+	}
+
+	// Pre-compressed .zip must skip gzip.
+	reqZip, _ := http.NewRequest(http.MethodGet, srv.URL+"/file/download?id="+second[0].ID, nil)
+	reqZip.Header.Set("Authorization", "Bearer "+testToken)
+	reqZip.Header.Set("Accept-Encoding", "gzip")
+	respZip, err := (&http.Client{Transport: &http.Transport{DisableCompression: true}}).Do(reqZip)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer respZip.Body.Close()
+	if respZip.Header.Get("Content-Encoding") != "" {
+		t.Fatalf("zip should not be gzipped, got Content-Encoding=%q", respZip.Header.Get("Content-Encoding"))
 	}
 }

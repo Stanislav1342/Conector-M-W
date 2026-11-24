@@ -24,6 +24,9 @@ func powerToken(inputToken string) string {
 
 func (p *powerController) register(mux *http.ServeMux, token string) {
 	mux.HandleFunc("/power/status", func(w http.ResponseWriter, req *http.Request) {
+		rc := http.NewResponseController(w)
+		_ = rc.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_ = rc.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		if req.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
@@ -35,6 +38,9 @@ func (p *powerController) register(mux *http.ServeMux, token string) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("/power/lock", func(w http.ResponseWriter, req *http.Request) {
+		rc := http.NewResponseController(w)
+		_ = rc.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_ = rc.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		if req.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return

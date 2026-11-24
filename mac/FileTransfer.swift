@@ -2,6 +2,7 @@ import Foundation
 
 final class FileTransfer {
     private let session: URLSession
+    private let delegate: TransferDelegate
     private let code: String
     private let baseURL: URL
 
@@ -14,11 +15,15 @@ final class FileTransfer {
         guard let root = components.url else { return nil }
         self.baseURL = root
         self.code = code
+        let delegate = TransferDelegate(fingerprint: fingerprint)
+        self.delegate = delegate
         let config = URLSessionConfiguration.ephemeral
+        config.networkServiceType = .default
+        config.httpMaximumConnectionsPerHost = 3
         config.connectionProxyDictionary = [:]
         config.timeoutIntervalForRequest = 30
         config.timeoutIntervalForResource = 300
-        self.session = URLSession(configuration: config, delegate: Pin(fingerprint), delegateQueue: nil)
+        self.session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
     }
 
     deinit {
@@ -30,6 +35,7 @@ final class FileTransfer {
     }
 
     func upload(fileURL: URL, destination: String, setClipboard: Bool, batchID: String?,
+                onProgress: ((Int64, Int64) -> Void)? = nil,
                 completion: @escaping (Result<String, Error>) -> Void) {
         guard let endpoint = URL(string: "/file", relativeTo: baseURL) else {
             completion(.failure(URLError(.badURL)))
@@ -50,37 +56,19 @@ final class FileTransfer {
             request.setValue(batchID, forHTTPHeaderField: "X-Conector-Batch")
         }
         request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
-        if let size = (try? fileURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize {
+        let size = Int64((try? fileURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+        if size >= 0 {
             request.setValue(String(size), forHTTPHeaderField: "Content-Length")
         }
-        session.uploadTask(with: request, fromFile: fileURL) { data, response, error in
-            if let error {
-                DispatchQueue.main.async { completion(.failure(error)) }
-                return
-            }
-            guard let http = response as? HTTPURLResponse else {
-                DispatchQueue.main.async { completion(.failure(URLError(.badServerResponse))) }
-                return
-            }
-            guard http.statusCode == 200 else {
-                let err = NSError(domain: "ConectorFileTransfer", code: http.statusCode,
-                                  userInfo: [NSLocalizedDescriptionKey: "HTTP \(http.statusCode)"])
-                DispatchQueue.main.async { completion(.failure(err)) }
-                return
-            }
-            let savedName: String
-            if let data,
-               let parsed = try? JSONDecoder().decode([String: AnyDecodableString].self, from: data),
-               let name = parsed["name"]?.value, !name.isEmpty {
-                savedName = name
-            } else {
-                savedName = fileURL.lastPathComponent
-            }
-            DispatchQueue.main.async { completion(.success(savedName)) }
-        }.resume()
+        let task = session.uploadTask(with: request, fromFile: fileURL)
+        delegate.registerUpload(taskID: task.taskIdentifier, fallbackName: fileURL.lastPathComponent,
+                                totalBytes: size, onProgress: onProgress, completion: completion)
+        task.resume()
     }
 
-    func download(file: OfferedFile, into directory: URL, completion: @escaping (Result<URL, Error>) -> Void) {
+    func download(file: OfferedFile, into directory: URL,
+                  onProgress: ((Int64, Int64) -> Void)? = nil,
+                  completion: @escaping (Result<URL, Error>) -> Void) {
         guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
             completion(.failure(URLError(.badURL)))
             return
@@ -94,36 +82,14 @@ final class FileTransfer {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "GET"
         request.timeoutInterval = 300
+        request.setValue("gzip", forHTTPHeaderField: "Accept-Encoding")
         if !code.isEmpty {
             request.setValue("Bearer \(code)", forHTTPHeaderField: "Authorization")
         }
-        session.downloadTask(with: request) { tempURL, response, error in
-            if let error {
-                DispatchQueue.main.async { completion(.failure(error)) }
-                return
-            }
-            guard let http = response as? HTTPURLResponse, let tempURL else {
-                DispatchQueue.main.async { completion(.failure(URLError(.badServerResponse))) }
-                return
-            }
-            guard http.statusCode == 200 else {
-                let err = NSError(domain: "ConectorFileTransfer", code: http.statusCode,
-                                  userInfo: [NSLocalizedDescriptionKey: "HTTP \(http.statusCode)"])
-                DispatchQueue.main.async { completion(.failure(err)) }
-                return
-            }
-            do {
-                let fm = FileManager.default
-                try fm.createDirectory(at: directory, withIntermediateDirectories: true)
-                let rawName = URL(fileURLWithPath: file.name).lastPathComponent
-                let safeName = (rawName.isEmpty || rawName == "." || rawName == "..") ? "file" : rawName
-                let destination = Self.uniqueDestination(in: directory, name: safeName)
-                try fm.moveItem(at: tempURL, to: destination)
-                DispatchQueue.main.async { completion(.success(destination)) }
-            } catch {
-                DispatchQueue.main.async { completion(.failure(error)) }
-            }
-        }.resume()
+        let task = session.downloadTask(with: request)
+        delegate.registerDownload(taskID: task.taskIdentifier, file: file, directory: directory,
+                                  onProgress: onProgress, completion: completion)
+        task.resume()
     }
 
     static func uniqueDestination(in directory: URL, name: String) -> URL {
@@ -159,6 +125,186 @@ final class FileTransfer {
             return String(format: "%.1f МБ", mb)
         }
         return String(format: "%.0f МБ", mb)
+    }
+
+    static func formatSpeed(_ bytesPerSecond: Double) -> String {
+        guard bytesPerSecond.isFinite, bytesPerSecond > 0 else { return "" }
+        let mb = bytesPerSecond / (1024.0 * 1024.0)
+        if mb >= 1.0 {
+            return String(format: "%.1f МБ/с", mb)
+        }
+        let kb = max(1.0, bytesPerSecond / 1024.0)
+        return String(format: "%.0f КБ/с", kb)
+    }
+}
+
+private final class TransferDelegate: NSObject, URLSessionTaskDelegate, URLSessionDownloadDelegate, URLSessionDataDelegate, @unchecked Sendable {
+    private struct UploadState {
+        let fallbackName: String
+        let totalBytes: Int64
+        var bodyData = Data()
+        let onProgress: ((Int64, Int64) -> Void)?
+        let completion: (Result<String, Error>) -> Void
+    }
+
+    private struct DownloadState {
+        let file: OfferedFile
+        let directory: URL
+        var movedURL: URL?
+        var moveError: Error?
+        let onProgress: ((Int64, Int64) -> Void)?
+        let completion: (Result<URL, Error>) -> Void
+    }
+
+    private let pin: Pin
+    private let lock = NSLock()
+    private var uploads: [Int: UploadState] = [:]
+    private var downloads: [Int: DownloadState] = [:]
+
+    init(fingerprint: String) {
+        self.pin = Pin(fingerprint)
+    }
+
+    func registerUpload(taskID: Int, fallbackName: String, totalBytes: Int64,
+                        onProgress: ((Int64, Int64) -> Void)?,
+                        completion: @escaping (Result<String, Error>) -> Void) {
+        lock.lock()
+        uploads[taskID] = UploadState(fallbackName: fallbackName, totalBytes: totalBytes,
+                                      onProgress: onProgress, completion: completion)
+        lock.unlock()
+    }
+
+    func registerDownload(taskID: Int, file: OfferedFile, directory: URL,
+                          onProgress: ((Int64, Int64) -> Void)?,
+                          completion: @escaping (Result<URL, Error>) -> Void) {
+        lock.lock()
+        downloads[taskID] = DownloadState(file: file, directory: directory,
+                                          onProgress: onProgress, completion: completion)
+        lock.unlock()
+    }
+
+    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        pin.urlSession(session, didReceive: challenge, completionHandler: completionHandler)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
+                    completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
+        pin.urlSession(session, task: task, willPerformHTTPRedirection: response, newRequest: request, completionHandler: completionHandler)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didSendBodyData bytesSent: Int64,
+                    totalBytesSent: Int64, totalBytesExpectedToSend: Int64) {
+        lock.lock()
+        let entry = uploads[task.taskIdentifier]
+        lock.unlock()
+        guard let entry, let cb = entry.onProgress else { return }
+        let total = totalBytesExpectedToSend > 0 ? totalBytesExpectedToSend : entry.totalBytes
+        DispatchQueue.main.async {
+            cb(totalBytesSent, total)
+        }
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        lock.lock()
+        if uploads[dataTask.taskIdentifier] != nil {
+            uploads[dataTask.taskIdentifier]?.bodyData.append(data)
+        }
+        lock.unlock()
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                    didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
+        lock.lock()
+        let entry = downloads[downloadTask.taskIdentifier]
+        lock.unlock()
+        guard let entry, let cb = entry.onProgress else { return }
+        let total = totalBytesExpectedToWrite > 0 ? totalBytesExpectedToWrite : entry.file.size
+        DispatchQueue.main.async {
+            cb(min(totalBytesWritten, max(total, totalBytesWritten)), total)
+        }
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+        lock.lock()
+        guard var entry = downloads[downloadTask.taskIdentifier] else {
+            lock.unlock()
+            return
+        }
+        let status = (downloadTask.response as? HTTPURLResponse)?.statusCode ?? 0
+        if status == 200 {
+            do {
+                let fm = FileManager.default
+                try fm.createDirectory(at: entry.directory, withIntermediateDirectories: true)
+                let rawName = URL(fileURLWithPath: entry.file.name).lastPathComponent
+                let safeName = (rawName.isEmpty || rawName == "." || rawName == "..") ? "file" : rawName
+                let destination = FileTransfer.uniqueDestination(in: entry.directory, name: safeName)
+                try fm.moveItem(at: location, to: destination)
+                entry.movedURL = destination
+            } catch {
+                entry.moveError = error
+            }
+        }
+        downloads[downloadTask.taskIdentifier] = entry
+        lock.unlock()
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        lock.lock()
+        let upload = uploads.removeValue(forKey: task.taskIdentifier)
+        let download = downloads.removeValue(forKey: task.taskIdentifier)
+        lock.unlock()
+
+        if let upload {
+            if let error {
+                DispatchQueue.main.async { upload.completion(.failure(error)) }
+                return
+            }
+            guard let http = task.response as? HTTPURLResponse else {
+                DispatchQueue.main.async { upload.completion(.failure(URLError(.badServerResponse))) }
+                return
+            }
+            guard http.statusCode == 200 else {
+                let err = NSError(domain: "ConectorFileTransfer", code: http.statusCode,
+                                  userInfo: [NSLocalizedDescriptionKey: "HTTP \(http.statusCode)"])
+                DispatchQueue.main.async { upload.completion(.failure(err)) }
+                return
+            }
+            let savedName: String
+            if let parsed = try? JSONDecoder().decode([String: AnyDecodableString].self, from: upload.bodyData),
+               let name = parsed["name"]?.value, !name.isEmpty {
+                savedName = name
+            } else {
+                savedName = upload.fallbackName
+            }
+            DispatchQueue.main.async { upload.completion(.success(savedName)) }
+            return
+        }
+
+        if let download {
+            if let error {
+                DispatchQueue.main.async { download.completion(.failure(error)) }
+                return
+            }
+            guard let http = task.response as? HTTPURLResponse else {
+                DispatchQueue.main.async { download.completion(.failure(URLError(.badServerResponse))) }
+                return
+            }
+            guard http.statusCode == 200 else {
+                let err = NSError(domain: "ConectorFileTransfer", code: http.statusCode,
+                                  userInfo: [NSLocalizedDescriptionKey: "HTTP \(http.statusCode)"])
+                DispatchQueue.main.async { download.completion(.failure(err)) }
+                return
+            }
+            if let movedURL = download.movedURL {
+                DispatchQueue.main.async { download.completion(.success(movedURL)) }
+            } else {
+                DispatchQueue.main.async {
+                    download.completion(.failure(download.moveError ?? URLError(.cannotCreateFile)))
+                }
+            }
+        }
     }
 }
 
