@@ -186,45 +186,92 @@ func swipeKeySequence(direction: SwipeDirection, horizontalAction: ThreeFingerSw
 
 struct PinchZoomDetector {
     let step: Double
+    let activateDelta: Double
     let cooldown: TimeInterval
     let resetWindow: TimeInterval
-    private var accumulator = 0.0
+    private var anchorDistance: Double?
+    private var anchorMid: (x: Double, y: Double)?
+    private var lastTriggerDistance = 0.0
     private var lastTrigger: TimeInterval = -.infinity
     private var lastUpdate: TimeInterval = -.infinity
+    private var suppressScrollUntil: TimeInterval = -.infinity
+    private(set) var active = false
 
-    init(step: Double = 0.14, cooldown: TimeInterval = 0.09, resetWindow: TimeInterval = 0.25) {
+    init(step: Double = 0.075, activateDelta: Double = 0.045, cooldown: TimeInterval = 0.11, resetWindow: TimeInterval = 0.25) {
         self.step = step
+        self.activateDelta = activateDelta
         self.cooldown = cooldown
         self.resetWindow = resetWindow
     }
 
-    mutating func reset() {
-        accumulator = 0
-        lastUpdate = -.infinity
+    func shouldSuppressScroll(now: TimeInterval) -> Bool {
+        active || now < suppressScrollUntil
     }
 
-    mutating func update(magnification: Double, ended: Bool, now: TimeInterval) -> String? {
-        if ended {
+    mutating func reset() {
+        anchorDistance = nil
+        anchorMid = nil
+        lastTriggerDistance = 0
+        lastUpdate = -.infinity
+        active = false
+    }
+
+    mutating func update(touches: [(x: Double, y: Double)], now: TimeInterval) -> String? {
+        if now - lastUpdate > resetWindow {
+            reset()
+        }
+        guard touches.count == 2 else {
+            if active {
+                suppressScrollUntil = now + 0.15
+            }
             reset()
             return nil
         }
-        guard magnification.isFinite, abs(magnification) < 1.0 else { return nil }
-        if now - lastUpdate > resetWindow {
-            accumulator = 0
-        }
         lastUpdate = now
-        accumulator += magnification
-        guard now - lastTrigger >= cooldown else {
-            accumulator = min(step, max(-step, accumulator))
+        let p0 = touches[0]
+        let p1 = touches[1]
+        let dx = p0.x - p1.x
+        let dy = p0.y - p1.y
+        let dist = (dx * dx + dy * dy).squareRoot()
+        let mid = (x: (p0.x + p1.x) * 0.5, y: (p0.y + p1.y) * 0.5)
+
+        guard let baseDist = anchorDistance, let baseMid = anchorMid else {
+            anchorDistance = dist
+            anchorMid = mid
+            lastTriggerDistance = dist
             return nil
         }
-        if accumulator >= step {
-            accumulator = 0
+
+        let deltaFromAnchor = dist - baseDist
+        let midShift = hypot(mid.x - baseMid.x, mid.y - baseMid.y)
+
+        if !active {
+            // Parallel 2-finger scrolling shifts both fingers together without changing spread.
+            if midShift >= 0.06 && abs(deltaFromAnchor) < activateDelta * 0.6 {
+                anchorDistance = dist
+                anchorMid = mid
+                lastTriggerDistance = dist
+                return nil
+            }
+            guard abs(deltaFromAnchor) >= activateDelta, abs(deltaFromAnchor) > midShift * 0.85 else {
+                return nil
+            }
+            active = true
+            suppressScrollUntil = now + 0.20
+            lastTriggerDistance = baseDist
+        } else {
+            suppressScrollUntil = now + 0.20
+        }
+
+        let delta = dist - lastTriggerDistance
+        guard now - lastTrigger >= cooldown else { return nil }
+        if delta >= step {
+            lastTriggerDistance = dist
             lastTrigger = now
             return "zoomIn"
         }
-        if accumulator <= -step {
-            accumulator = 0
+        if delta <= -step {
+            lastTriggerDistance = dist
             lastTrigger = now
             return "zoomOut"
         }

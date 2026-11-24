@@ -272,18 +272,29 @@ test("Cmd + Shift + Space, Ctrl + Space, and disabled setting pass through norma
     expectEqual(disabled.events(for: 49, down: true, flagsChanged: false), [key(0x39, true)])
 }
 
-test("pinch zoom detector filters jitter, emits zoomIn/zoomOut, and resets cleanly") {
+test("pinch zoom detector tracks 2-finger spread, ignores parallel scroll, and suppresses stray scroll") {
     var pinch = PinchZoomDetector()
-    expect(pinch.update(magnification: 0.05, ended: false, now: 1.0) == nil)
-    expect(pinch.update(magnification: 0.06, ended: false, now: 1.02) == nil)
-    expectEqual(pinch.update(magnification: 0.05, ended: false, now: 1.04), "zoomIn")
+    // Parallel 2-finger scroll shifts midpoint without changing spread -> no zoom, no scroll suppression.
+    expect(pinch.update(touches: [(0.4, 0.4), (0.6, 0.4)], now: 1.0) == nil)
+    expect(pinch.update(touches: [(0.4, 0.55), (0.6, 0.55)], now: 1.03) == nil)
+    expect(!pinch.shouldSuppressScroll(now: 1.04))
+
+    // Spreading 2 fingers apart triggers zoomIn and suppresses scroll during pinch.
+    expect(pinch.update(touches: [(0.45, 0.5), (0.55, 0.5)], now: 1.5) == nil) // gap > 0.25s resets anchor
+    expectEqual(pinch.update(touches: [(0.40, 0.5), (0.60, 0.5)], now: 1.53), "zoomIn")
+    expect(pinch.shouldSuppressScroll(now: 1.54))
+
     // Cooldown prevents flooding while pinching rapidly.
-    expect(pinch.update(magnification: 0.20, ended: false, now: 1.07) == nil)
-    expectEqual(pinch.update(magnification: -0.30, ended: false, now: 1.20), "zoomOut")
-    // Ending resets accumulated delta.
-    expect(pinch.update(magnification: 0.10, ended: false, now: 1.35) == nil)
-    expect(pinch.update(magnification: 0.0, ended: true, now: 1.36) == nil)
-    expect(pinch.update(magnification: 0.08, ended: false, now: 1.40) == nil)
+    expect(pinch.update(touches: [(0.30, 0.5), (0.70, 0.5)], now: 1.58) == nil)
+
+    // Pinching 2 fingers together triggers zoomOut after cooldown.
+    expectEqual(pinch.update(touches: [(0.44, 0.5), (0.56, 0.5)], now: 1.70), "zoomOut")
+
+    // Lifting fingers resets active state and releases scroll suppression after grace period.
+    expect(pinch.update(touches: [], now: 1.75) == nil)
+    expect(!pinch.active)
+    expect(pinch.shouldSuppressScroll(now: 1.80))
+    expect(!pinch.shouldSuppressScroll(now: 1.95))
 }
 
 test("Cmd + arrows and Shift + Cmd + arrows map to Home/End and restore Ctrl on Cmd+C") {

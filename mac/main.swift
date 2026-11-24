@@ -176,9 +176,12 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
     var lastActivateAttempt = Date.distantPast
     var lastReinforce = Date.distantPast
     var lastDragProbe = Date.distantPast
+    var dragStartChangeCount = NSPasteboard(name: .drag).changeCount
+    var dragStartedBelowTop = false
     var pendingDropHide: DispatchWorkItem?
     var offeredWindowsFiles: [OfferedFile] = []
     var offerGeneration: UInt64 = 0
+    var latencyActivity: NSObjectProtocol?
     let clipboardQueue = DispatchQueue(label: "com.stanislav1342.conector-m-w.clipboard", qos: .utility)
     var captureAnchor: NSPanel?
     var handoffConfirmed = false
@@ -238,8 +241,11 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             self?.sendFilesToWindows(urls, destination: nil)
         }
 
-        timer = Timer(timeInterval: 0.008, repeats: true) { [weak self] _ in self?.tick() }
-        if let timer { RunLoop.main.add(timer, forMode: .common) }
+        timer = Timer(timeInterval: 0.006, repeats: true) { [weak self] _ in self?.tick() }
+        if let timer {
+            timer.tolerance = 0
+            RunLoop.main.add(timer, forMode: .common)
+        }
         display(.idle)
         refreshPermissions()
         showWindow()
@@ -545,6 +551,12 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         lastSyncedClipboardHash = nil
         lastSentAwake = nil
         retryDelay = 0.8
+        if latencyActivity == nil {
+            latencyActivity = ProcessInfo.processInfo.beginActivity(
+                options: [.userInitiated, .latencyCritical],
+                reason: "Conector-M-W remote input"
+            )
+        }
         refreshPermissions()
         updateControlStatus()
         refreshFileMenuItems()
@@ -606,6 +618,8 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             if let image = message.image { applyRemoteClipboardImage(image) }
         case "fileOffer":
             if let files = message.files, !files.isEmpty { handleRemoteFileOffer(files) }
+        case "fileDrop":
+            if let files = message.files, !files.isEmpty { handleRemoteFileDrop(files) }
         case "inputUnavailable": connectionFailed(.http(503))
         case "invalid": connectionFailed(.failure(.cannotParseResponse))
         default: break
@@ -934,6 +948,46 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         }
     }
 
+    func handleRemoteFileDrop(_ files: [OfferedFile]) {
+        offerGeneration &+= 1
+        offeredWindowsFiles = files
+        refreshFileMenuItems()
+        guard receiverSupportsFiles, let transfer = fileTransfer else { return }
+        let fm = FileManager.default
+        let targetDir: URL
+        if controlSettings.fileDestination == "desktop" {
+            targetDir = fm.urls(for: .desktopDirectory, in: .userDomainMask).first
+                ?? fm.homeDirectoryForCurrentUser.appendingPathComponent("Desktop", isDirectory: true)
+        } else {
+            targetDir = fm.urls(for: .downloadsDirectory, in: .userDomainMask).first
+                ?? fm.homeDirectoryForCurrentUser.appendingPathComponent("Downloads", isDirectory: true)
+        }
+        let label = files.count == 1 ? files[0].name : "\(files.count) файлов"
+        fileDropBar.showStatus("Получаем с Windows: \(label)…", on: builtInScreen(), duration: 2.5)
+        downloadBatch(files, using: transfer, into: targetDir) { [weak self] saved, firstError in
+            guard let self else { return }
+            if !saved.isEmpty {
+                let items = self.filterRegularFiles(saved, maxBytes: 25 * 1024 * 1024)
+                if !items.isEmpty {
+                    let meta = items.map { "\($0.url.path)|\($0.size)|\($0.mtime)" }.sorted().joined(separator: "\n")
+                    self.lastSyncedClipboardHash = self.clipboardHash(kind: "files", payload: Data(meta.utf8))
+                    let pb = NSPasteboard.general
+                    pb.clearContents()
+                    pb.writeObjects(saved as [NSURL])
+                    self.lastClipboardChangeCount = pb.changeCount
+                }
+                let text = saved.count == 1
+                    ? "Получено в «\(self.fileDestinationLabel())»: \(saved[0].lastPathComponent)"
+                    : "Получено в «\(self.fileDestinationLabel())»: \(saved.count) файлов"
+                self.fileDropBar.showStatus(text, on: self.builtInScreen(), duration: 3.0)
+                self.log.record("received \(saved.count) dropped file(s) from Windows")
+            } else if let firstError {
+                self.fileDropBar.showStatus("Ошибка получения файла: \(firstError.localizedDescription)",
+                                            on: self.builtInScreen(), duration: 3.0)
+            }
+        }
+    }
+
     func updateControlStatus() {
         if remote {
             display(.remote)
@@ -967,12 +1021,12 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
                 updateRemoteCursor()
             }
         }
-        if now.timeIntervalSince(lastInputCheck) >= 1 {
+        if !remote, now.timeIntervalSince(lastInputCheck) >= ((window.isVisible || !ready) ? 1.0 : 5.0) {
             lastInputCheck = now
             if window.isVisible || linked { refreshPermissions() }
             syncAwakeIfNeeded()
         }
-        if linked, now.timeIntervalSince(lastClipboardCheck) >= 0.25 {
+        if linked, !remote, now.timeIntervalSince(lastClipboardCheck) >= 0.25 {
             lastClipboardCheck = now
             syncLocalClipboardIfNeeded()
         }
@@ -1139,7 +1193,12 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         suppressedShortcutKeys.removeAll()
         pendingDropHide?.cancel()
         pendingDropHide = nil
+        dragStartedBelowTop = false
         fileDropBar.hideDropZone()
+        if let act = latencyActivity {
+            ProcessInfo.processInfo.endActivity(act)
+            latencyActivity = nil
+        }
         topEdgePush.reset()
         pinchDetector.reset()
         lastSentAwake = nil
@@ -1324,6 +1383,12 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         }
     }
 
+    func flushMotionIfDue() {
+        if !pending.isEmpty && !sending && Date().timeIntervalSince(lastSend) >= 0.006 {
+            flush()
+        }
+    }
+
     func flush() {
         guard let connection, linked, !sending,
               !pending.isEmpty || Date().timeIntervalSince(lastSend) > (remote ? 0.5 : 5) else { return }
@@ -1382,23 +1447,30 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         if !remote {
             if Self.gestureEventTypes.contains(type.rawValue) { return original }
             switch type {
-            case .leftMouseDown, .rightMouseDown, .otherMouseDown: localButtons.insert(button)
-            case .leftMouseUp, .rightMouseUp, .otherMouseUp: localButtons.remove(button)
+            case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+                localButtons.insert(button)
+                if type == .leftMouseDown {
+                    dragStartChangeCount = NSPasteboard(name: .drag).changeCount
+                    let bounds = CGDisplayBounds(CGGetOnlineBuiltInDisplay())
+                    dragStartedBelowTop = bounds.width > 0 && event.location.y > bounds.minY + 60
+                }
+            case .leftMouseUp, .rightMouseUp, .otherMouseUp:
+                localButtons.remove(button)
+                if type == .leftMouseUp { dragStartedBelowTop = false }
             case .keyDown: localKeys.insert(key)
             case .keyUp: localKeys.remove(key)
             default: break
             }
             if linked, receiverSupportsFiles, controlSettings.fileTransferEnabled {
-                if type == .leftMouseDragged {
+                if type == .leftMouseDragged, dragStartedBelowTop {
                     let bounds = CGDisplayBounds(CGGetOnlineBuiltInDisplay())
                     if bounds.width > 0, event.location.x >= bounds.minX, event.location.x < bounds.maxX {
-                        if event.location.y <= bounds.minY + 48 {
+                        if event.location.y <= bounds.minY + 72 {
                             if !fileDropBar.isShowingDropZone {
                                 let now = Date()
-                                if now.timeIntervalSince(lastDragProbe) >= 0.08 {
+                                if now.timeIntervalSince(lastDragProbe) >= 0.05 {
                                     lastDragProbe = now
-                                    let dragPB = NSPasteboard(name: .drag)
-                                    if dragPB.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]),
+                                    if NSPasteboard(name: .drag).changeCount != dragStartChangeCount,
                                        let screen = builtInScreen() {
                                         pendingDropHide?.cancel()
                                         pendingDropHide = nil
@@ -1406,7 +1478,7 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
                                     }
                                 }
                             }
-                        } else if event.location.y > bounds.minY + 150, fileDropBar.isShowingDropZone {
+                        } else if event.location.y > bounds.minY + 160, fileDropBar.isShowingDropZone {
                             pendingDropHide?.cancel()
                             pendingDropHide = nil
                             fileDropBar.hideDropZone()
@@ -1418,7 +1490,7 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
                         self?.fileDropBar.hideDropZone()
                     }
                     pendingDropHide = hideWork
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: hideWork)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.20, execute: hideWork)
                 }
             }
             guard type == .mouseMoved else { return original }
@@ -1515,9 +1587,19 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             if let nsEvent = NSEvent(cgEvent: event), !nsEvent.touches(matching: .any, in: nil).isEmpty {
                 let touches = nsEvent.touches(matching: .touching, in: nil)
                 let count = touches.count
+                let now = Date().timeIntervalSinceReferenceDate
+                if controlSettings.pinchToZoom && receiverSupportsShortcuts {
+                    let touchPoints = touches.map { (x: Double($0.normalizedPosition.x), y: Double($0.normalizedPosition.y)) }
+                    if let action = pinchDetector.update(touches: touchPoints, now: now) {
+                        channel?.sendShortcut(action, capture: captureID)
+                        log.record("pinch -> \(action)")
+                    }
+                } else {
+                    pinchDetector.reset()
+                }
                 let avgX = count > 0 ? touches.reduce(0.0) { $0 + $1.normalizedPosition.x } / Double(count) : 0
                 let avgY = count > 0 ? touches.reduce(0.0) { $0 + $1.normalizedPosition.y } / Double(count) : 0
-                if let direction = swipeDetector.update(touchCount: count, x: avgX, y: avgY, now: Date().timeIntervalSinceReferenceDate) {
+                if let direction = swipeDetector.update(touchCount: count, x: avgX, y: avgY, now: now) {
                     if receiverSupportsShortcuts {
                         if let action = swipeShortcutAction(direction: direction,
                                                             horizontalAction: controlSettings.threeFingerSwipeAction,
@@ -1540,24 +1622,10 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             }
             return nil
         }
-        if type.rawValue == 30 {
-            if controlSettings.pinchToZoom && receiverSupportsShortcuts {
-                let isDockSwipe = CGEventField(rawValue: 110).map { event.getIntegerValueField($0) == 23 } ?? false
-                if !isDockSwipe, let nsEvent = NSEvent(cgEvent: event), nsEvent.type == .magnify {
-                    let ended = nsEvent.phase == .ended || nsEvent.phase == .cancelled
-                    if let action = pinchDetector.update(magnification: Double(nsEvent.magnification),
-                                                         ended: ended,
-                                                         now: Date().timeIntervalSinceReferenceDate) {
-                        channel?.sendShortcut(action, capture: captureID)
-                        log.record("pinch -> \(action)")
-                    }
-                }
-            }
-            return nil
-        }
         if Self.gestureEventTypes.contains(type.rawValue) {
             return nil
         }
+        var immediateFlush = false
         switch type {
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
             let recentWarp = Date().timeIntervalSince(lastWarp) < 0.045
@@ -1579,8 +1647,12 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             if button <= 2 {
                 let down = type == .leftMouseDown || type == .rightMouseDown || type == .otherMouseDown
                 pending.append(Input(kind: "button", code: button, down: down))
+                immediateFlush = true
             }
         case .scrollWheel:
+            if pinchDetector.shouldSuppressScroll(now: Date().timeIntervalSinceReferenceDate) {
+                break
+            }
             let continuous = event.getIntegerValueField(.scrollWheelEventIsContinuous) != 0
             let rawX: Double
             let rawY: Double
@@ -1597,9 +1669,14 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         case .keyDown, .keyUp, .flagsChanged:
             let down = type == .flagsChanged ? event.flags.rawValue & (modifierMasks[key] ?? 0) != 0 : type == .keyDown
             pending.append(contentsOf: keyboard.events(for: key, down: down, flagsChanged: type == .flagsChanged))
+            immediateFlush = true
         default: break
         }
-        flushIfIdle()
+        if immediateFlush {
+            flushIfIdle()
+        } else {
+            flushMotionIfDue()
+        }
         return nil
     }
 }

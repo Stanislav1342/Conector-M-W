@@ -423,19 +423,26 @@ func TestStreamShortcut(t *testing.T) {
 	h.send(ws, inputFrame{Type: "shortcut", Capture: 4, Action: "unknown"})
 	h.send(ws, inputFrame{Capture: 4, Events: []event{{Kind: "key", Code: 0x2a, Down: true}}})
 	waitFor(t, "shift held before snip", func() bool { return h.held(0x2a) })
+	setFakeSnipPayload(samplePNG(t))
 	h.send(ws, inputFrame{Type: "shortcut", Capture: 4, Action: "snip"})
 	h.send(ws, inputFrame{Type: "shortcut", Capture: 4, Action: "desktopNext"})
 	h.send(ws, inputFrame{Type: "shortcut", Capture: 4, Action: "zoomIn"})
-	waitFor(t, "three valid shortcuts", func() bool {
-		return len(sentShortcuts()) == 3
+	waitFor(t, "two valid shortcuts and one snip overlay", func() bool {
+		return len(sentShortcuts()) == 2 && snipCalls() == 1
 	})
 	got := sentShortcuts()
-	if got[0] != "snip" || got[1] != "desktopNext" || got[2] != "zoomIn" {
-		t.Fatalf("shortcuts = %v, want [snip desktopNext zoomIn]", got)
+	if got[0] != "desktopNext" || got[1] != "zoomIn" {
+		t.Fatalf("shortcuts = %v, want [desktopNext zoomIn]", got)
 	}
 	if h.held(0x2a) {
 		t.Fatal("snip must release held modifiers first")
 	}
+	if msg := h.read(ws); msg.Type != "clipboardImage" || msg.Image == "" {
+		t.Fatalf("snip must send clipboardImage over WebSocket, got %+v", msg)
+	}
+	waitFor(t, "snip saved to Windows clipboard", func() bool {
+		return len(fakeClipboardImage()) > 0
+	})
 	// Stream must still accept events after invalid/stale shortcut frames.
 	h.send(ws, inputFrame{Capture: 4, Events: []event{{Kind: "key", Code: 0x1e, Down: true}}})
 	waitFor(t, "key held after shortcut", func() bool { return h.held(0x1e) })
@@ -616,5 +623,87 @@ func TestStreamClipboardFileOfferAndDownload(t *testing.T) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil || string(body) != "pdf-bytes-123" {
 		t.Fatalf("downloaded body = %q, %v", body, err)
+	}
+}
+
+func TestEncodeBGRACropToPNG(t *testing.T) {
+	// 4x4 BGRA image where pixel (1,2) is RGB(10, 20, 30) -> BGRA(30, 20, 10, 255).
+	bgra := make([]byte, 4*4*4)
+	off := (2*4 + 1) * 4
+	bgra[off] = 30
+	bgra[off+1] = 20
+	bgra[off+2] = 10
+	bgra[off+3] = 0 // alpha ignored and forced opaque
+
+	// Reversed & slightly out-of-bounds drag coordinates must normalize and clamp cleanly.
+	out, err := encodeBGRACropToPNG(bgra, 4, 4, 5, 4, 1, 2)
+	if err != nil {
+		t.Fatalf("encodeBGRACropToPNG: %v", err)
+	}
+	decoded, err := png.Decode(bytes.NewReader(out))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Bounds().Dx() != 3 || decoded.Bounds().Dy() != 2 {
+		t.Fatalf("bounds = %v, want 3x2", decoded.Bounds())
+	}
+	r, g, b, a := decoded.At(0, 0).RGBA()
+	if r>>8 != 10 || g>>8 != 20 || b>>8 != 30 || a>>8 != 255 {
+		t.Fatalf("pixel = (%d,%d,%d,%d), want (10,20,30,255)", r>>8, g>>8, b>>8, a>>8)
+	}
+	if _, err := encodeBGRACropToPNG(bgra, 4, 4, 0, 0, 1, 1); err == nil {
+		t.Fatal("expected error for 1x1 selection")
+	}
+}
+
+func TestStreamDropBarSendsFileDrop(t *testing.T) {
+	resetFake(t)
+	srcDir := t.TempDir()
+	samplePath := filepath.Join(srcDir, "dropped.txt")
+	if err := os.WriteFile(samplePath, []byte("from-windows-drop"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	clip := newClipboardBridge()
+	store := newFileStore()
+	ctrl := &sync.Mutex{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/stream", inputStreamWithBridge(context.Background(), newReceiver(), ctrl, testToken, clip, store))
+	mux.HandleFunc("/file/download", handleFileDownload(testToken, store))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	ws, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http")+"/stream", http.Header{
+		"Authorization": []string{"Bearer " + testToken},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.Close()
+	var ready streamMessage
+	if err := ws.ReadJSON(&ready); err != nil || ready.Type != "ready" {
+		t.Fatalf("ready = %+v, err=%v", ready, err)
+	}
+
+	triggerFakeDrop([]string{samplePath})
+	var msg streamMessage
+	_ = ws.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if err := ws.ReadJSON(&msg); err != nil {
+		t.Fatal(err)
+	}
+	if msg.Type != "fileDrop" || len(msg.Files) != 1 || msg.Files[0].Name != "dropped.txt" {
+		t.Fatalf("drop message = %+v, want fileDrop for dropped.txt", msg)
+	}
+
+	dlReq, _ := http.NewRequest(http.MethodGet, srv.URL+"/file/download?id="+msg.Files[0].ID, nil)
+	dlReq.Header.Set("Authorization", "Bearer "+testToken)
+	resp, err := http.DefaultClient.Do(dlReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil || string(body) != "from-windows-drop" {
+		t.Fatalf("downloaded = %q, %v", body, err)
 	}
 }

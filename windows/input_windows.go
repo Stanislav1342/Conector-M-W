@@ -45,9 +45,9 @@ type monitorInfo struct {
 	flags   uint32
 }
 
-// pointAtBottom reports whether (x, y) rests on the bottom edge of its monitor
-// and no other Windows monitor lies directly below it. Caller must hold cursorDPI().
-func pointAtBottom(x, y int32) bool {
+// nearBottomEdge reports whether (x, y) lies within margin pixels of the bottom edge of its
+// monitor and no other Windows monitor lies directly below it. Caller must hold cursorDPI().
+func nearBottomEdge(x, y, margin int32) (winRect, bool) {
 	const (
 		monitorDefaultToNull    = 0
 		monitorDefaultToNearest = 2
@@ -55,17 +55,27 @@ func pointAtBottom(x, y int32) bool {
 	probe := winRect{left: x, top: y, right: x + 1, bottom: y + 1}
 	mon, _, _ := monitorFromRect.Call(uintptr(unsafe.Pointer(&probe)), monitorDefaultToNearest)
 	if mon == 0 {
-		return false
+		return winRect{}, false
 	}
 	var mi monitorInfo
 	mi.size = uint32(unsafe.Sizeof(mi))
 	ok, _, _ := getMonitorInfoW.Call(mon, uintptr(unsafe.Pointer(&mi)))
-	if ok == 0 || y < mi.monitor.bottom-1 {
-		return false
+	if ok == 0 || y < mi.monitor.bottom-margin {
+		return winRect{}, false
 	}
 	below := winRect{left: x, top: mi.monitor.bottom, right: x + 1, bottom: mi.monitor.bottom + 1}
 	nextMon, _, _ := monitorFromRect.Call(uintptr(unsafe.Pointer(&below)), monitorDefaultToNull)
-	return nextMon == 0
+	if nextMon != 0 {
+		return winRect{}, false
+	}
+	return mi.monitor, true
+}
+
+// pointAtBottom reports whether (x, y) rests on the bottom edge of its monitor
+// and no other Windows monitor lies directly below it. Caller must hold cursorDPI().
+func pointAtBottom(x, y int32) bool {
+	_, ok := nearBottomEdge(x, y, 1)
+	return ok
 }
 
 func atBottom() bool {
@@ -193,12 +203,7 @@ func (e event) send() error {
 		}
 		return nil
 	case "move":
-		defer cursorDPI()()
-		var point [2]int32
-		if ok, _, err := getCursorPos.Call(uintptr(unsafe.Pointer(&point))); ok == 0 {
-			return fmt.Errorf("GetCursorPos failed: %v", err)
-		}
-		return moveCursor(point[0]+e.X, point[1]+e.Y)
+		i.mouse = mouseInput{x: e.X, y: e.Y, flags: 0x0001}
 	case "scroll":
 		if e.Y != 0 {
 			i.mouse = mouseInput{data: uint32(e.Y), flags: 0x0800}

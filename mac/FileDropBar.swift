@@ -13,7 +13,7 @@ final class FileDropBar {
         if let panel, let dropView, let label {
             return (panel, dropView, label)
         }
-        let frame = NSRect(x: 0, y: 0, width: 380, height: 54)
+        let frame = NSRect(x: 0, y: 0, width: 420, height: 60)
         let next = NSPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel],
                            backing: .buffered, defer: false)
         next.isOpaque = false
@@ -33,6 +33,9 @@ final class FileDropBar {
         target.onDropFiles = { [weak self] urls in
             self?.hideDropZone()
             self?.onDrop?(urls)
+        }
+        target.onRejectedDrag = { [weak self] in
+            self?.hideDropZone()
         }
 
         let field = NSTextField(labelWithString: "")
@@ -79,11 +82,11 @@ final class FileDropBar {
         panel.ignoresMouseEvents = false
         field.stringValue = "Отпустите для отправки на Windows (\(destinationLabel))"
         target.setHighlighted(false)
-        let width: CGFloat = 380
-        let height: CGFloat = 54
+        let width: CGFloat = 420
+        let height: CGFloat = 60
         let vf = screen.visibleFrame
         let posX = max(vf.minX + 12, min(x - width / 2, vf.maxX - width - 12))
-        let posY = screen.frame.maxY - height - 8
+        let posY = screen.frame.maxY - height - 2
         panel.setFrame(NSRect(x: posX, y: posY, width: width, height: height), display: true)
         panel.alphaValue = 1
         panel.orderFrontRegardless()
@@ -122,14 +125,17 @@ final class FileDropBar {
 
 private final class DropTargetView: NSView {
     var onDropFiles: (([URL]) -> Void)?
+    var onRejectedDrag: (() -> Void)?
     var onHighlightChange: ((Bool) -> Void)?
+
+    private static let legacyFilenamesType = NSPasteboard.PasteboardType("NSFilenamesPboardType")
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.cornerRadius = frameRect.height / 2
         layer?.masksToBounds = true
-        registerForDraggedTypes([.fileURL])
+        registerForDraggedTypes([.fileURL, Self.legacyFilenamesType])
     }
 
     required init?(coder: NSCoder) {
@@ -140,11 +146,31 @@ private final class DropTargetView: NSView {
         onHighlightChange?(value)
     }
 
+    private func extractFileURLs(from pb: NSPasteboard) -> [URL] {
+        if let urls = pb.readObjects(forClasses: [NSURL.self],
+                                     options: [.urlReadingFileURLsOnly: true]) as? [URL] {
+            let fileURLs = urls.filter { $0.isFileURL }
+            if !fileURLs.isEmpty {
+                return fileURLs
+            }
+        }
+        if let paths = pb.propertyList(forType: Self.legacyFilenamesType) as? [String] {
+            return paths.map { URL(fileURLWithPath: $0) }
+        }
+        return []
+    }
+
     override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
-        let canRead = sender.draggingPasteboard.canReadObject(forClasses: [NSURL.self],
-                                                              options: [.urlReadingFileURLsOnly: true])
-        setHighlighted(canRead)
-        return canRead ? .copy : []
+        let urls = extractFileURLs(from: sender.draggingPasteboard)
+        if urls.isEmpty {
+            setHighlighted(false)
+            DispatchQueue.main.async {
+                self.onRejectedDrag?()
+            }
+            return []
+        }
+        setHighlighted(true)
+        return .copy
     }
 
     override func draggingExited(_ sender: (any NSDraggingInfo)?) {
@@ -157,11 +183,7 @@ private final class DropTargetView: NSView {
 
     override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
         setHighlighted(false)
-        guard let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self],
-                                                               options: [.urlReadingFileURLsOnly: true]) as? [URL] else {
-            return false
-        }
-        let fileURLs = urls.filter { $0.isFileURL }
+        let fileURLs = extractFileURLs(from: sender.draggingPasteboard)
         guard !fileURLs.isEmpty else { return false }
         DispatchQueue.main.async {
             self.onDropFiles?(fileURLs)

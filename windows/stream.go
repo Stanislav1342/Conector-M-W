@@ -107,6 +107,13 @@ func inputStreamWithBridge(ctx context.Context, r *receiver, control *sync.Mutex
 			return
 		}
 		var keepAwake atomic.Bool
+		stopDropBar := startDropBar(func(paths []string) {
+			offered := files.register(paths)
+			if len(offered) > 0 {
+				_ = write(streamMessage{Type: "fileDrop", Files: offered})
+			}
+		})
+		defer stopDropBar()
 		pushClipCh := make(chan struct{}, 1)
 		applyClipCh := make(chan clipApplyJob, 8)
 		enqueuePushClipboard := func() {
@@ -176,12 +183,19 @@ func inputStreamWithBridge(ctx context.Context, r *receiver, control *sync.Mutex
 			}
 		}()
 		var capture uint64
+		var lastCapture uint64
+		var lastDeadline time.Time
 		for {
-			readTimeout := 15 * time.Second
-			if capture != 0 {
-				readTimeout = 6 * time.Second
+			now := time.Now()
+			if capture != lastCapture || now.Sub(lastDeadline) >= time.Second {
+				readTimeout := 15 * time.Second
+				if capture != 0 {
+					readTimeout = 6 * time.Second
+				}
+				_ = ws.SetReadDeadline(now.Add(readTimeout))
+				lastCapture = capture
+				lastDeadline = now
 			}
-			_ = ws.SetReadDeadline(time.Now().Add(readTimeout))
 			kind, data, err := ws.ReadMessage()
 			if err != nil {
 				return
@@ -219,17 +233,32 @@ func inputStreamWithBridge(ctx context.Context, r *receiver, control *sync.Mutex
 				continue
 			case "shortcut":
 				if capture != 0 && frame.Capture == capture && validShortcutAction(frame.Action) {
-					r.mu.Lock()
-					if !r.stopped {
-						r.last = time.Now()
-						if frame.Action == "snip" {
+					if frame.Action == "snip" {
+						r.mu.Lock()
+						if !r.stopped {
+							r.last = time.Now()
 							r.release()
 						}
-						if err := sendShortcut(frame.Action); err != nil {
-							log.Printf("stream shortcut %s: %v", frame.Action, err)
+						r.mu.Unlock()
+						startSnipOverlay(func(pngBytes []byte) {
+							if err := clip.applyRemoteImage(pngBytes); err != nil {
+								log.Printf("snip clipboard apply: %v", err)
+							}
+							_ = write(streamMessage{
+								Type:  "clipboardImage",
+								Image: base64.StdEncoding.EncodeToString(pngBytes),
+							})
+						})
+					} else {
+						r.mu.Lock()
+						if !r.stopped {
+							r.last = time.Now()
+							if err := sendShortcut(frame.Action); err != nil {
+								log.Printf("stream shortcut %s: %v", frame.Action, err)
+							}
 						}
+						r.mu.Unlock()
 					}
-					r.mu.Unlock()
 				}
 				continue
 			}
