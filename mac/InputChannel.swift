@@ -10,10 +10,21 @@ struct ClipboardFrame: Encodable {
     let clipboard: String
 }
 
+struct ClipboardImageFrame: Encodable {
+    let type = "clipboardImage"
+    let image: String
+}
+
+struct AwakeFrame: Encodable {
+    let type = "awake"
+    let awake: Bool
+}
+
 struct ChannelMessage: Decodable {
     let type: String
     let capture: UInt64?
     let text: String?
+    let image: String?
 }
 
 final class InputChannel {
@@ -39,7 +50,7 @@ final class InputChannel {
         var request = URLRequest(url: endpoint)
         request.setValue("Bearer \(connection.code)", forHTTPHeaderField: "Authorization")
         task = session.webSocketTask(with: request)
-        task.maximumMessageSize = 2 * 1024 * 1024
+        task.maximumMessageSize = 12 * 1024 * 1024
     }
 
     func start() {
@@ -101,6 +112,31 @@ final class InputChannel {
 
     func sendClipboard(_ text: String) {
         guard !closed, let payload = try? JSONEncoder().encode(ClipboardFrame(clipboard: text)) else { return }
+        task.send(.data(payload)) { [weak self] error in
+            DispatchQueue.main.async {
+                guard let self, !self.closed else { return }
+                if let error {
+                    self.fail(.failure((error as? URLError)?.code ?? .networkConnectionLost))
+                }
+            }
+        }
+    }
+
+    func sendClipboardImage(_ pngData: Data) {
+        guard !closed, pngData.count <= maxClipboardImageBytes,
+              let payload = try? JSONEncoder().encode(ClipboardImageFrame(image: pngData.base64EncodedString())) else { return }
+        task.send(.data(payload)) { [weak self] error in
+            DispatchQueue.main.async {
+                guard let self, !self.closed else { return }
+                if let error {
+                    self.fail(.failure((error as? URLError)?.code ?? .networkConnectionLost))
+                }
+            }
+        }
+    }
+
+    func sendAwake(_ awake: Bool) {
+        guard !closed, let payload = try? JSONEncoder().encode(AwakeFrame(awake: awake)) else { return }
         task.send(.data(payload)) { [weak self] error in
             DispatchQueue.main.async {
                 guard let self, !self.closed else { return }

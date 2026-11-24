@@ -1,11 +1,18 @@
 package main
 
 import (
+	"crypto/sha256"
 	"strings"
 	"sync"
 )
 
 const maxClipboardBytes = 512 << 10
+
+type clipboardItem struct {
+	kind  string
+	text  string
+	image []byte
+}
 
 func normalizeClipboardNewlines(text string) string {
 	text = strings.ReplaceAll(text, "\r\n", "\n")
@@ -17,10 +24,21 @@ func windowsClipboardNewlines(text string) string {
 	return strings.ReplaceAll(canonical, "\n", "\r\n")
 }
 
+func clipboardDigest(kind string, payload []byte) [32]byte {
+	h := sha256.New()
+	_, _ = h.Write([]byte(kind))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write(payload)
+	var sum [32]byte
+	copy(sum[:], h.Sum(nil))
+	return sum
+}
+
 type clipboardBridge struct {
 	mu       sync.Mutex
 	lastSeq  uint32
-	lastText string
+	lastHash [32]byte
+	hasHash  bool
 }
 
 func newClipboardBridge() *clipboardBridge {
@@ -40,38 +58,82 @@ func (b *clipboardBridge) applyRemote(text string) error {
 	if err := setClipboardText(windowsClipboardNewlines(canonical)); err != nil {
 		return err
 	}
-	b.lastText = canonical
+	b.lastHash = clipboardDigest("text", []byte(canonical))
+	b.hasHash = true
 	b.lastSeq = getClipboardSequenceNumber()
 	return nil
 }
 
-func (b *clipboardBridge) pollLocal() (string, bool) {
+func (b *clipboardBridge) applyRemoteImage(pngData []byte) error {
+	if len(pngData) == 0 || len(pngData) > maxClipboardImageBytes {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if err := setClipboardImage(pngData); err != nil {
+		return err
+	}
+	b.lastHash = clipboardDigest("image", pngData)
+	b.hasHash = true
+	b.lastSeq = getClipboardSequenceNumber()
+	return nil
+}
+
+func (b *clipboardBridge) pollLocal() (clipboardItem, bool) {
 	seq := getClipboardSequenceNumber()
 	b.mu.Lock()
 	unchanged := seq == b.lastSeq
 	b.mu.Unlock()
 	if unchanged {
-		return "", false
+		return clipboardItem{}, false
 	}
 
-	raw, ok, err := getClipboardText()
+	item, ok, err := getClipboardContent()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.lastSeq == seq {
-		return "", false
+		return clipboardItem{}, false
 	}
 	if err != nil {
-		return "", false
+		return clipboardItem{}, false
 	}
 	b.lastSeq = seq
-	if !ok || len(raw) == 0 || len(raw) > maxClipboardBytes {
-		b.lastText = ""
-		return "", false
+	if !ok {
+		b.hasHash = false
+		return clipboardItem{}, false
 	}
-	canonical := strings.ReplaceAll(normalizeClipboardNewlines(raw), "\x00", "")
-	if canonical == "" || len(canonical) > maxClipboardBytes || canonical == b.lastText {
-		return "", false
+	switch item.kind {
+	case "text":
+		if len(item.text) == 0 || len(item.text) > maxClipboardBytes {
+			b.hasHash = false
+			return clipboardItem{}, false
+		}
+		canonical := strings.ReplaceAll(normalizeClipboardNewlines(item.text), "\x00", "")
+		if canonical == "" || len(canonical) > maxClipboardBytes {
+			b.hasHash = false
+			return clipboardItem{}, false
+		}
+		sum := clipboardDigest("text", []byte(canonical))
+		if b.hasHash && sum == b.lastHash {
+			return clipboardItem{}, false
+		}
+		b.lastHash = sum
+		b.hasHash = true
+		return clipboardItem{kind: "text", text: canonical}, true
+	case "image":
+		if len(item.image) == 0 || len(item.image) > maxClipboardImageBytes {
+			b.hasHash = false
+			return clipboardItem{}, false
+		}
+		sum := clipboardDigest("image", item.image)
+		if b.hasHash && sum == b.lastHash {
+			return clipboardItem{}, false
+		}
+		b.lastHash = sum
+		b.hasHash = true
+		return item, true
+	default:
+		b.hasHash = false
+		return clipboardItem{}, false
 	}
-	b.lastText = canonical
-	return canonical, true
 }

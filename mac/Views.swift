@@ -507,11 +507,25 @@ private struct SettingsView: View {
                 Toggle("Показывать подсказку при переходе", isOn: $model.settings.animate)
             }
             Section("Буфер обмена") {
-                Toggle("Общий буфер обмена (текст)", isOn: $model.settings.clipboardSync)
+                Toggle("Общий буфер обмена (текст и скриншоты)", isOn: $model.settings.clipboardSync)
+            }
+            Section("Блокировка и экран") {
+                Toggle("Не давать Windows гасить экран, пока активен Mac", isOn: $model.settings.keepWindowsAwake)
+                Toggle("Блокировать Windows при блокировке Mac", isOn: $model.settings.lockWindowsOnMacLock)
+            }
+            Section("Жесты тачпада") {
+                Picker("Свайп 3 пальцами влево / вправо", selection: $model.settings.threeFingerSwipeAction) {
+                    Text("Рабочие столы Windows").tag(ThreeFingerSwipeAction.desktops)
+                    Text("Переключение приложений (Alt + Tab)").tag(ThreeFingerSwipeAction.switchApps)
+                    Text("Назад / Вперёд").tag(ThreeFingerSwipeAction.browserHistory)
+                    Text("Выключено").tag(ThreeFingerSwipeAction.off)
+                }
+                Toggle("Свайп 3 пальцами вверх — обзор окон (Win + Tab)", isOn: $model.settings.threeFingerSwipeUp)
             }
             Section {
                 Toggle("⌘ Command работает как Ctrl", isOn: $model.settings.commandIsControl)
                 Toggle("⌘ + Пробел переключает язык на Windows", isOn: $model.settings.commandSpaceSwitchesLanguage)
+                Toggle("⌘ + L блокирует Windows", isOn: $model.settings.commandLLocksWindows)
                 LabeledContent("Скорость курсора Windows") {
                     HStack(spacing: 10) {
                         Image(systemName: "tortoise").foregroundStyle(.secondary)
@@ -520,6 +534,18 @@ private struct SettingsView: View {
                             .accessibilityLabel("Скорость курсора Windows")
                         Image(systemName: "hare").foregroundStyle(.secondary)
                         Text("\(Int(model.settings.speed * 100)) %")
+                            .monospacedDigit()
+                            .frame(width: 48, alignment: .trailing)
+                    }
+                }
+                LabeledContent("Плавность прокрутки") {
+                    HStack(spacing: 10) {
+                        Image(systemName: "tortoise").foregroundStyle(.secondary)
+                        Slider(value: $model.settings.scrollSmoothness, in: 0.2...2.0)
+                            .frame(width: 180)
+                            .accessibilityLabel("Плавность прокрутки")
+                        Image(systemName: "hare").foregroundStyle(.secondary)
+                        Text("\(Int(model.settings.scrollSmoothness * 100)) %")
                             .monospacedDigit()
                             .frame(width: 48, alignment: .trailing)
                     }

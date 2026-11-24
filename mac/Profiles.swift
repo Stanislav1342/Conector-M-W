@@ -43,6 +43,32 @@ struct ControlSettings {
         get { defaults.object(forKey: "cursorSpeed") as? Double ?? 1 }
         set { defaults.set(newValue, forKey: "cursorSpeed") }
     }
+    var scrollSmoothness: Double {
+        get { defaults.object(forKey: "scrollSmoothness") as? Double ?? 0.6 }
+        set { defaults.set(newValue, forKey: "scrollSmoothness") }
+    }
+    var commandLLocksWindows: Bool {
+        get { defaults.object(forKey: "commandLLocksWindows") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "commandLLocksWindows") }
+    }
+    var keepWindowsAwake: Bool {
+        get { defaults.object(forKey: "keepWindowsAwake") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "keepWindowsAwake") }
+    }
+    var lockWindowsOnMacLock: Bool {
+        get { defaults.object(forKey: "lockWindowsOnMacLock") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "lockWindowsOnMacLock") }
+    }
+    var threeFingerSwipeAction: ThreeFingerSwipeAction {
+        get {
+            (defaults.string(forKey: "threeFingerSwipeAction")).flatMap(ThreeFingerSwipeAction.init(rawValue:)) ?? .desktops
+        }
+        set { defaults.set(newValue.rawValue, forKey: "threeFingerSwipeAction") }
+    }
+    var threeFingerSwipeUp: Bool {
+        get { defaults.object(forKey: "threeFingerSwipeUp") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "threeFingerSwipeUp") }
+    }
 }
 
 final class Profiles {

@@ -118,6 +118,7 @@ func powerCode(accessCode: String) -> String {
 }
 
 let maxClipboardBytes = 512 * 1024
+let maxClipboardImageBytes = 6 * 1024 * 1024
 
 func normalizeClipboardText(_ text: String) -> String {
     text.replacingOccurrences(of: "\r\n", with: "\n")

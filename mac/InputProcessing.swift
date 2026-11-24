@@ -20,6 +20,102 @@ struct PointerMotion {
     }
 }
 
+struct ScrollMotion {
+    let smoothness: Double
+    private var remainderX = 0.0
+    private var remainderY = 0.0
+
+    init(smoothness: Double) {
+        self.smoothness = smoothness.isFinite ? min(2.0, max(0.2, smoothness)) : 0.6
+    }
+
+    mutating func scale(x: Double, y: Double, continuous: Bool) -> (x: Int32, y: Int32) {
+        let clampedX = continuous ? min(2000.0, max(-2000.0, x)) : min(50.0, max(-50.0, x))
+        let clampedY = continuous ? min(2000.0, max(-2000.0, y)) : min(50.0, max(-50.0, y))
+        let factor = (continuous ? 1.6 : 120.0) * smoothness
+        let scaledX = clampedX * factor + remainderX
+        let scaledY = clampedY * factor + remainderY
+        let wholeX = scaledX.rounded(.towardZero)
+        let wholeY = scaledY.rounded(.towardZero)
+        remainderX = scaledX - wholeX
+        remainderY = scaledY - wholeY
+        let outX = Int32(min(10000.0, max(-10000.0, wholeX)))
+        let outY = Int32(min(10000.0, max(-10000.0, wholeY)))
+        return (outX, outY)
+    }
+}
+
+enum ThreeFingerSwipeAction: String, CaseIterable {
+    case desktops
+    case switchApps
+    case browserHistory
+    case off
+}
+
+enum SwipeDirection: Equatable {
+    case left
+    case right
+    case up
+}
+
+struct ThreeFingerSwipeDetector {
+    private var anchor: (x: Double, y: Double)?
+    private var triggeredInGesture = false
+    private var lastTrigger: TimeInterval = -.infinity
+
+    mutating func reset() {
+        anchor = nil
+        triggeredInGesture = false
+    }
+
+    mutating func update(touchCount: Int, x: Double, y: Double, now: TimeInterval) -> SwipeDirection? {
+        guard touchCount == 3 else {
+            reset()
+            return nil
+        }
+        guard let anchor else {
+            self.anchor = (x, y)
+            return nil
+        }
+        guard !triggeredInGesture, now - lastTrigger >= 0.35 else { return nil }
+        let dx = x - anchor.x
+        let dy = y - anchor.y
+        if abs(dx) >= 0.14, abs(dx) > abs(dy) * 1.4 {
+            triggeredInGesture = true
+            lastTrigger = now
+            return dx < 0 ? .left : .right
+        }
+        if dy >= 0.14, dy > abs(dx) * 1.4 {
+            triggeredInGesture = true
+            lastTrigger = now
+            return .up
+        }
+        return nil
+    }
+}
+
+func swipeKeySequence(direction: SwipeDirection, horizontalAction: ThreeFingerSwipeAction, upEnabled: Bool) -> [Input] {
+    let combo: [UInt16]
+    switch direction {
+    case .up:
+        guard upEnabled else { return [] }
+        combo = [0x15b, 0x0f] // Win + Tab
+    case .left, .right:
+        switch horizontalAction {
+        case .off:
+            return []
+        case .desktops:
+            combo = [0x1d, 0x15b, direction == .left ? 0x14d : 0x14b] // Ctrl + Win + Right / Left
+        case .switchApps:
+            combo = direction == .left ? [0x38, 0x0f] : [0x38, 0x2a, 0x0f] // Alt+Tab / Alt+Shift+Tab
+        case .browserHistory:
+            combo = [0x38, direction == .left ? 0x14d : 0x14b] // Alt + Right / Left
+        }
+    }
+    return combo.map { Input(kind: "key", code: $0, down: true) } +
+           combo.reversed().map { Input(kind: "key", code: $0, down: false) }
+}
+
 struct RemoteKeyboard {
     let commandIsControl: Bool
     let commandSpaceSwitchesLanguage: Bool

@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"log"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -16,12 +18,15 @@ type inputFrame struct {
 	Capture   uint64
 	Events    []event
 	Clipboard string `json:"clipboard,omitempty"`
+	Image     string `json:"image,omitempty"`
+	Awake     *bool  `json:"awake,omitempty"`
 }
 
 type streamMessage struct {
 	Type    string `json:"type"`
 	Capture uint64 `json:"capture,omitempty"`
 	Text    string `json:"text,omitempty"`
+	Image   string `json:"image,omitempty"`
 }
 
 func validEvents(events []event) bool {
@@ -68,32 +73,51 @@ func inputStreamContext(ctx context.Context, r *receiver, control *sync.Mutex, t
 		stopClosing := context.AfterFunc(streamCtx, func() { _ = ws.Close() })
 		defer stopClosing()
 		defer r.releaseAll()
-		ws.SetReadLimit(2 << 20)
+		ws.SetReadLimit(12 << 20)
 		var writeMu sync.Mutex
 		write := func(message streamMessage) error {
 			writeMu.Lock()
 			defer writeMu.Unlock()
-			_ = ws.SetWriteDeadline(time.Now().Add(time.Second))
+			deadline := time.Second
+			if message.Type == "clipboardImage" {
+				deadline = 5 * time.Second
+			}
+			_ = ws.SetWriteDeadline(time.Now().Add(deadline))
 			return ws.WriteJSON(message)
 		}
 		if write(streamMessage{Type: "ready"}) != nil {
 			return
 		}
 		clip := newClipboardBridge()
+		var keepAwake atomic.Bool
 		pushClipboard := func() {
-			if text, ok := clip.pollLocal(); ok {
-				_ = write(streamMessage{Type: "clipboard", Text: text})
+			if item, ok := clip.pollLocal(); ok {
+				switch item.kind {
+				case "text":
+					_ = write(streamMessage{Type: "clipboard", Text: item.text})
+				case "image":
+					_ = write(streamMessage{
+						Type:  "clipboardImage",
+						Image: base64.StdEncoding.EncodeToString(item.image),
+					})
+				}
 			}
 		}
 		go func() {
-			ticker := time.NewTicker(250 * time.Millisecond)
-			defer ticker.Stop()
+			clipTicker := time.NewTicker(250 * time.Millisecond)
+			awakeTicker := time.NewTicker(25 * time.Second)
+			defer clipTicker.Stop()
+			defer awakeTicker.Stop()
 			for {
 				select {
 				case <-streamCtx.Done():
 					return
-				case <-ticker.C:
+				case <-clipTicker.C:
 					pushClipboard()
+				case <-awakeTicker.C:
+					if keepAwake.Load() {
+						pulseKeepAwake()
+					}
 				}
 			}
 		}()
@@ -114,10 +138,29 @@ func inputStreamContext(ctx context.Context, r *receiver, control *sync.Mutex, t
 				_ = write(streamMessage{Type: "invalid"})
 				return
 			}
-			if frame.Type == "clipboard" {
+			switch frame.Type {
+			case "clipboard":
 				if len(frame.Clipboard) <= maxClipboardBytes {
 					if err := clip.applyRemote(frame.Clipboard); err != nil {
 						log.Printf("clipboard apply: %v", err)
+					}
+				}
+				continue
+			case "clipboardImage":
+				if len(frame.Image) > 0 && len(frame.Image) <= base64.StdEncoding.EncodedLen(maxClipboardImageBytes) {
+					pngBytes, err := base64.StdEncoding.DecodeString(frame.Image)
+					if err == nil && len(pngBytes) > 0 && len(pngBytes) <= maxClipboardImageBytes {
+						if err := clip.applyRemoteImage(pngBytes); err != nil {
+							log.Printf("clipboard image apply: %v", err)
+						}
+					}
+				}
+				continue
+			case "awake":
+				if frame.Awake != nil {
+					prev := keepAwake.Swap(*frame.Awake)
+					if *frame.Awake && !prev {
+						pulseKeepAwake()
 					}
 				}
 				continue

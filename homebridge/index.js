@@ -38,7 +38,7 @@ module.exports = api => {
           this.wakingUntil = Date.now() + 45000;
         } else {
           const status = await request(this.connection, true);
-          if (status !== 202) throw new Error(`Conector-M-W shutdown rejected (HTTP ${status})`);
+          if (status !== 202) throw new Error(`Conector-M-W lock rejected (HTTP ${status})`);
           this.wakingUntil = 0;
         }
       } catch (error) {

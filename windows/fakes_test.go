@@ -9,14 +9,17 @@ import (
 )
 
 var fake struct {
-	mu          sync.Mutex
-	sent        []event
-	failKey     uint16 // key-up for this code fails while non-zero
-	err         error  // every send fails while non-nil
-	bottom      bool
-	clipSeq     uint32
-	clipText    string
-	clipHasText bool
+	mu           sync.Mutex
+	sent         []event
+	failKey      uint16 // key-up for this code fails while non-zero
+	err          error  // every send fails while non-nil
+	bottom       bool
+	clipSeq      uint32
+	clipText     string
+	clipHasText  bool
+	clipImage    []byte
+	clipHasImage bool
+	awakePulses  int
 }
 
 func (e event) send() error {
@@ -41,9 +44,15 @@ func atBottom() bool {
 func setDPIAware()                  {}
 func startupOption() (bool, error)  { return false, nil }
 func loadPairing() (pairing, error) { return pairing{}, nil }
-func openHappLink(string) error     { return nil }
+func lockWindows() error            { return nil }
 func showError(string)              {}
 func runTray(*trayApp)              {}
+
+func pulseKeepAwake() {
+	fake.mu.Lock()
+	fake.awakePulses++
+	fake.mu.Unlock()
+}
 
 type trayApp struct {
 	invite  *pairingInvite
@@ -67,13 +76,16 @@ func getClipboardSequenceNumber() uint32 {
 	return fake.clipSeq
 }
 
-func getClipboardText() (string, bool, error) {
+func getClipboardContent() (clipboardItem, bool, error) {
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
-	if !fake.clipHasText {
-		return "", false, nil
+	if fake.clipHasText {
+		return clipboardItem{kind: "text", text: fake.clipText}, true, nil
 	}
-	return fake.clipText, true, nil
+	if fake.clipHasImage {
+		return clipboardItem{kind: "image", image: append([]byte(nil), fake.clipImage...)}, true, nil
+	}
+	return clipboardItem{}, false, nil
 }
 
 func setClipboardText(text string) error {
@@ -82,6 +94,19 @@ func setClipboardText(text string) error {
 	fake.clipSeq++
 	fake.clipText = text
 	fake.clipHasText = true
+	fake.clipImage = nil
+	fake.clipHasImage = false
+	return nil
+}
+
+func setClipboardImage(pngData []byte) error {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	fake.clipSeq++
+	fake.clipText = ""
+	fake.clipHasText = false
+	fake.clipImage = append([]byte(nil), pngData...)
+	fake.clipHasImage = true
 	return nil
 }
 
@@ -90,7 +115,15 @@ func resetFake(t *testing.T) {
 	fake.mu.Lock()
 	fake.sent, fake.failKey, fake.err, fake.bottom = nil, 0, nil, false
 	fake.clipSeq, fake.clipText, fake.clipHasText = 0, "", false
+	fake.clipImage, fake.clipHasImage = nil, false
+	fake.awakePulses = 0
 	fake.mu.Unlock()
+}
+
+func awakePulses() int {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	return fake.awakePulses
 }
 
 func sentEvents() []event {
@@ -110,6 +143,18 @@ func setFakeClipboard(text string) {
 	fake.clipSeq++
 	fake.clipText = text
 	fake.clipHasText = true
+	fake.clipImage = nil
+	fake.clipHasImage = false
+	fake.mu.Unlock()
+}
+
+func setFakeClipboardImage(pngData []byte) {
+	fake.mu.Lock()
+	fake.clipSeq++
+	fake.clipText = ""
+	fake.clipHasText = false
+	fake.clipImage = append([]byte(nil), pngData...)
+	fake.clipHasImage = true
 	fake.mu.Unlock()
 }
 
@@ -117,4 +162,10 @@ func fakeClipboard() string {
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
 	return fake.clipText
+}
+
+func fakeClipboardImage() []byte {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	return append([]byte(nil), fake.clipImage...)
 }

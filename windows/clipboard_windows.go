@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"runtime"
+	"sync"
 	"syscall"
 	"time"
 	"unicode/utf16"
@@ -10,8 +12,10 @@ import (
 )
 
 const (
+	cfDIB         = 8
 	cfUnicodeText = 13
 	gmemMoveable  = 0x0002
+	maxDIBBytes   = 32 << 20
 )
 
 var (
@@ -24,12 +28,30 @@ var (
 	rtlMoveMemory              = kernel32.NewProc("RtlMoveMemory")
 	getClipboardSequenceProc   = user32.NewProc("GetClipboardSequenceNumber")
 	isClipboardFormatAvailable = user32.NewProc("IsClipboardFormatAvailable")
+	registerClipboardFormatW   = user32.NewProc("RegisterClipboardFormatW")
 	openClipboard              = user32.NewProc("OpenClipboard")
 	closeClipboard             = user32.NewProc("CloseClipboard")
 	emptyClipboard             = user32.NewProc("EmptyClipboard")
 	getClipboardData           = user32.NewProc("GetClipboardData")
 	setClipboardData           = user32.NewProc("SetClipboardData")
 )
+
+var (
+	pngFormatOnce sync.Once
+	pngFormatID   uintptr
+)
+
+func pngClipboardFormat() uintptr {
+	pngFormatOnce.Do(func() {
+		name, err := syscall.UTF16PtrFromString("PNG")
+		if err != nil {
+			return
+		}
+		id, _, _ := registerClipboardFormatW.Call(uintptr(unsafe.Pointer(name)))
+		pngFormatID = id
+	})
+	return pngFormatID
+}
 
 func getClipboardSequenceNumber() uint32 {
 	seq, _, _ := getClipboardSequenceProc.Call()
@@ -47,6 +69,38 @@ func openClipboardWithRetry() error {
 		time.Sleep(15 * time.Millisecond)
 	}
 	return fmt.Errorf("OpenClipboard: %v", lastErr)
+}
+
+func copyGlobalBytes(hMem uintptr, maxLen int) ([]byte, error) {
+	size, _, _ := globalSize.Call(hMem)
+	if size == 0 || int(size) > maxLen {
+		return nil, nil
+	}
+	src, _, err := globalLock.Call(hMem)
+	if src == 0 {
+		return nil, fmt.Errorf("GlobalLock: %v", err)
+	}
+	buf := make([]byte, int(size))
+	rtlMoveMemory.Call(uintptr(unsafe.Pointer(&buf[0])), src, size)
+	runtime.KeepAlive(buf)
+	globalUnlock.Call(hMem)
+	return buf, nil
+}
+
+func allocGlobalBytes(data []byte) (uintptr, error) {
+	hMem, _, err := globalAlloc.Call(gmemMoveable, uintptr(len(data)))
+	if hMem == 0 {
+		return 0, fmt.Errorf("GlobalAlloc: %v", err)
+	}
+	dst, _, err := globalLock.Call(hMem)
+	if dst == 0 {
+		globalFree.Call(hMem)
+		return 0, fmt.Errorf("GlobalLock: %v", err)
+	}
+	rtlMoveMemory.Call(dst, uintptr(unsafe.Pointer(&data[0])), uintptr(len(data)))
+	runtime.KeepAlive(data)
+	globalUnlock.Call(hMem)
+	return hMem, nil
 }
 
 func getClipboardText() (string, bool, error) {
@@ -103,6 +157,55 @@ func getClipboardText() (string, bool, error) {
 	return text, true, nil
 }
 
+func getClipboardContent() (clipboardItem, bool, error) {
+	if text, ok, err := getClipboardText(); err != nil {
+		return clipboardItem{}, false, err
+	} else if ok {
+		return clipboardItem{kind: "text", text: text}, true, nil
+	}
+
+	pngFmt := pngClipboardFormat()
+	hasPNG := false
+	if pngFmt != 0 {
+		avail, _, _ := isClipboardFormatAvailable.Call(pngFmt)
+		hasPNG = avail != 0
+	}
+	availDIB, _, _ := isClipboardFormatAvailable.Call(cfDIB)
+	hasDIB := availDIB != 0
+	if !hasPNG && !hasDIB {
+		return clipboardItem{}, false, nil
+	}
+
+	if err := openClipboardWithRetry(); err != nil {
+		return clipboardItem{}, false, err
+	}
+	defer closeClipboard.Call()
+
+	if hasPNG {
+		if hMem, _, _ := getClipboardData.Call(pngFmt); hMem != 0 {
+			data, err := copyGlobalBytes(hMem, maxClipboardImageBytes)
+			if err == nil && len(data) >= 8 && bytes.HasPrefix(data, []byte("\x89PNG\r\n\x1a\n")) {
+				return clipboardItem{kind: "image", image: data}, true, nil
+			}
+		}
+	}
+	if hasDIB {
+		if hMem, _, _ := getClipboardData.Call(cfDIB); hMem != 0 {
+			dib, err := copyGlobalBytes(hMem, maxDIBBytes)
+			if err != nil {
+				return clipboardItem{}, false, err
+			}
+			if len(dib) >= 40 {
+				pngData, err := dibToPNG(dib)
+				if err == nil && len(pngData) > 0 && len(pngData) <= maxClipboardImageBytes {
+					return clipboardItem{kind: "image", image: pngData}, true, nil
+				}
+			}
+		}
+	}
+	return clipboardItem{}, false, nil
+}
+
 func setClipboardText(text string) error {
 	encoded := utf16.Encode([]rune(text))
 	encoded = append(encoded, 0)
@@ -133,6 +236,57 @@ func setClipboardText(text string) error {
 	if res, _, err := setClipboardData.Call(cfUnicodeText, hMem); res == 0 {
 		globalFree.Call(hMem)
 		return fmt.Errorf("SetClipboardData: %v", err)
+	}
+	return nil
+}
+
+func setClipboardImage(pngData []byte) error {
+	dib, err := pngToDIB(pngData)
+	if err != nil {
+		return err
+	}
+	hDIB, err := allocGlobalBytes(dib)
+	if err != nil {
+		return err
+	}
+	var hPNG uintptr
+	pngFmt := pngClipboardFormat()
+	if pngFmt != 0 {
+		hPNG, err = allocGlobalBytes(pngData)
+		if err != nil {
+			globalFree.Call(hDIB)
+			return err
+		}
+	}
+
+	if err := openClipboardWithRetry(); err != nil {
+		globalFree.Call(hDIB)
+		if hPNG != 0 {
+			globalFree.Call(hPNG)
+		}
+		return err
+	}
+	defer closeClipboard.Call()
+
+	if ok, _, err := emptyClipboard.Call(); ok == 0 {
+		globalFree.Call(hDIB)
+		if hPNG != 0 {
+			globalFree.Call(hPNG)
+		}
+		return fmt.Errorf("EmptyClipboard: %v", err)
+	}
+	if res, _, err := setClipboardData.Call(cfDIB, hDIB); res == 0 {
+		globalFree.Call(hDIB)
+		if hPNG != 0 {
+			globalFree.Call(hPNG)
+		}
+		return fmt.Errorf("SetClipboardData(CF_DIB): %v", err)
+	}
+	// hDIB is now owned by Windows; never free it even if registering PNG fails.
+	if hPNG != 0 {
+		if res, _, _ := setClipboardData.Call(pngFmt, hPNG); res == 0 {
+			globalFree.Call(hPNG)
+		}
 	}
 	return nil
 }

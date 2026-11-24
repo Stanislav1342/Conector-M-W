@@ -154,6 +154,8 @@ func runTray(app *trayApp) {
 	}, nil)
 }
 
+var shellExecute = syscall.NewLazyDLL("shell32.dll").NewProc("ShellExecuteW")
+
 func openPath(path string) error {
 	verb, _ := syscall.UTF16PtrFromString("open")
 	target, err := syscall.UTF16PtrFromString(path)

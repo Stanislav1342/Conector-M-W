@@ -61,6 +61,61 @@ test("huge deltas are clamped before scaling") {
     expectEqual(moved.y, -10000)
 }
 
+test("scroll smoothness scales trackpad continuous deltas and carries remainder") {
+    expectEqual(ScrollMotion(smoothness: 0.05).smoothness, 0.2)
+    expectEqual(ScrollMotion(smoothness: 5).smoothness, 2.0)
+    expectEqual(ScrollMotion(smoothness: .nan).smoothness, 0.6)
+
+    var scroll = ScrollMotion(smoothness: 0.5) // factor = 0.8
+    let step1 = scroll.scale(x: 0.5, y: 1.0, continuous: true)
+    expectEqual(step1.x, 0)
+    expectEqual(step1.y, 0)
+    let step2 = scroll.scale(x: 0.5, y: 1.0, continuous: true)
+    expectEqual(step2.x, 0) // 0.4 + 0.4 = 0.8
+    expectEqual(step2.y, 1) // 0.8 + 0.8 = 1.6 -> 1, rem 0.6
+    let step3 = scroll.scale(x: 0.5, y: 0.0, continuous: true)
+    expectEqual(step3.x, 1) // 0.8 + 0.4 = 1.2 -> 1
+}
+
+test("scroll smoothness scales discrete mouse wheel notches") {
+    var scroll = ScrollMotion(smoothness: 1.0)
+    let moved = scroll.scale(x: 0, y: 1, continuous: false)
+    expectEqual(moved.y, 120)
+    let clamped = scroll.scale(x: 1000, y: -1000, continuous: false)
+    expectEqual(clamped.x, 6000)
+    expectEqual(clamped.y, -6000)
+}
+
+test("three-finger swipe detector triggers once per swipe with cooldown") {
+    var detector = ThreeFingerSwipeDetector()
+    expect(detector.update(touchCount: 2, x: 0.5, y: 0.5, now: 1.0) == nil)
+    expect(detector.update(touchCount: 3, x: 0.5, y: 0.5, now: 1.0) == nil)
+    expect(detector.update(touchCount: 3, x: 0.34, y: 0.51, now: 1.05) == .left)
+    expect(detector.update(touchCount: 3, x: 0.20, y: 0.51, now: 1.1) == nil, "single trigger per gesture")
+    expect(detector.update(touchCount: 0, x: 0, y: 0, now: 1.2) == nil)
+    expect(detector.update(touchCount: 3, x: 0.5, y: 0.5, now: 1.25) == nil)
+    expect(detector.update(touchCount: 3, x: 0.7, y: 0.5, now: 1.3) == nil, "cooldown")
+    expect(detector.update(touchCount: 0, x: 0, y: 0, now: 1.5) == nil)
+    expect(detector.update(touchCount: 3, x: 0.5, y: 0.5, now: 1.6) == nil)
+    expect(detector.update(touchCount: 3, x: 0.7, y: 0.5, now: 1.65) == .right)
+    expect(detector.update(touchCount: 0, x: 0, y: 0, now: 2.1) == nil)
+    expect(detector.update(touchCount: 3, x: 0.5, y: 0.5, now: 2.2) == nil)
+    expect(detector.update(touchCount: 3, x: 0.51, y: 0.68, now: 2.25) == .up)
+}
+
+test("three-finger swipe sequences map actions accurately") {
+    expectEqual(swipeKeySequence(direction: .left, horizontalAction: .desktops, upEnabled: true),
+                [key(0x1d, true), key(0x15b, true), key(0x14d, true), key(0x14d, false), key(0x15b, false), key(0x1d, false)])
+    expectEqual(swipeKeySequence(direction: .right, horizontalAction: .switchApps, upEnabled: true),
+                [key(0x38, true), key(0x2a, true), key(0x0f, true), key(0x0f, false), key(0x2a, false), key(0x38, false)])
+    expectEqual(swipeKeySequence(direction: .left, horizontalAction: .browserHistory, upEnabled: true),
+                [key(0x38, true), key(0x14d, true), key(0x14d, false), key(0x38, false)])
+    expectEqual(swipeKeySequence(direction: .up, horizontalAction: .off, upEnabled: true),
+                [key(0x15b, true), key(0x0f, true), key(0x0f, false), key(0x15b, false)])
+    expectEqual(swipeKeySequence(direction: .up, horizontalAction: .desktops, upEnabled: false), [])
+    expectEqual(swipeKeySequence(direction: .left, horizontalAction: .off, upEnabled: true), [])
+}
+
 // MARK: - Keyboard
 
 test("ordinary key press and release") {

@@ -310,10 +310,8 @@ func startReceiver(onServerError func(error)) (*receiverService, error) {
 	mux.HandleFunc("/stream", inputStreamContext(ctx, r, &control, token))
 	mux.HandleFunc("/device", deviceInfo(token))
 	invite.register(mux, token)
-	power := &powerController{shutdown: shutdownWindows}
+	power := &powerController{lock: lockWindows}
 	power.register(mux, powerToken(token))
-	vpn := &vpnController{open: openHappLink}
-	vpn.register(mux, powerToken(token))
 	mux.HandleFunc("/input", func(w http.ResponseWriter, req *http.Request) {
 		if req.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)

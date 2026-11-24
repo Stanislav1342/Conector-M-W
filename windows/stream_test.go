@@ -3,7 +3,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/binary"
+	"image"
+	"image/color"
+	"image/png"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -245,4 +251,117 @@ func TestStreamClipboardIgnoresOversizedPayload(t *testing.T) {
 	if fakeClipboard() != "" {
 		t.Fatal("oversized clipboard must be ignored")
 	}
+}
+
+func samplePNG(t *testing.T) []byte {
+	t.Helper()
+	img := image.NewNRGBA(image.Rect(0, 0, 2, 2))
+	img.SetNRGBA(0, 0, color.NRGBA{R: 255, G: 0, B: 0, A: 255})
+	img.SetNRGBA(1, 0, color.NRGBA{R: 0, G: 255, B: 0, A: 255})
+	img.SetNRGBA(0, 1, color.NRGBA{R: 0, G: 0, B: 255, A: 255})
+	img.SetNRGBA(1, 1, color.NRGBA{R: 0, G: 0, B: 0, A: 0})
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func TestClipboardPNGAndDIBRoundTrip(t *testing.T) {
+	pngData := samplePNG(t)
+	dib, err := pngToDIB(pngData)
+	if err != nil {
+		t.Fatalf("pngToDIB: %v", err)
+	}
+	outPNG, err := dibToPNG(dib)
+	if err != nil {
+		t.Fatalf("dibToPNG: %v", err)
+	}
+	decoded, err := png.Decode(bytes.NewReader(outPNG))
+	if err != nil {
+		t.Fatalf("png.Decode: %v", err)
+	}
+	// Bottom-right transparent pixel was composited over white in DIB.
+	r, g, b, _ := decoded.At(1, 1).RGBA()
+	if r>>8 != 255 || g>>8 != 255 || b>>8 != 255 {
+		t.Fatalf("transparent pixel composite = (%d,%d,%d), want white", r>>8, g>>8, b>>8)
+	}
+	// All-zero alpha 32-bit DIB (like Windows PrintScreen) must decode as opaque.
+	dibZeroAlpha := append([]byte(nil), dib...)
+	for i := 40; i+3 < len(dibZeroAlpha); i += 4 {
+		dibZeroAlpha[i+3] = 0
+	}
+	opaquePNG, err := dibToPNG(dibZeroAlpha)
+	if err != nil {
+		t.Fatalf("dibToPNG zero alpha: %v", err)
+	}
+	opaqueImg, err := png.Decode(bytes.NewReader(opaquePNG))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, a := opaqueImg.At(0, 0).RGBA()
+	if a>>8 != 255 {
+		t.Fatalf("all-zero alpha DIB got alpha=%d, want 255", a>>8)
+	}
+
+	// 24-bit bottom-up DIB with odd width (padding check).
+	dib24 := make([]byte, 40+4)
+	binary.LittleEndian.PutUint32(dib24[0:4], 40)
+	binary.LittleEndian.PutUint32(dib24[4:8], 1)
+	binary.LittleEndian.PutUint32(dib24[8:12], 1)
+	binary.LittleEndian.PutUint16(dib24[12:14], 1)
+	binary.LittleEndian.PutUint16(dib24[14:16], 24)
+	dib24[40], dib24[41], dib24[42] = 10, 20, 30
+	png24, err := dibToPNG(dib24)
+	if err != nil {
+		t.Fatalf("dibToPNG 24-bit: %v", err)
+	}
+	img24, err := png.Decode(bytes.NewReader(png24))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r24, g24, b24, _ := img24.At(0, 0).RGBA()
+	if r24>>8 != 30 || g24>>8 != 20 || b24>>8 != 10 {
+		t.Fatalf("24-bit pixel = (%d,%d,%d), want (30,20,10)", r24>>8, g24>>8, b24>>8)
+	}
+}
+
+func TestStreamClipboardImageSyncAndNoEcho(t *testing.T) {
+	h := newStream(t)
+	ws := h.connect()
+	pngData := samplePNG(t)
+	h.send(ws, inputFrame{Type: "clipboardImage", Image: base64.StdEncoding.EncodeToString(pngData)})
+	waitFor(t, "image clipboard written on Windows", func() bool {
+		return bytes.Equal(fakeClipboardImage(), pngData)
+	})
+	_ = ws.SetReadDeadline(time.Now().Add(350 * time.Millisecond))
+	var extra streamMessage
+	if err := ws.ReadJSON(&extra); err == nil {
+		t.Fatalf("unexpected echo message: %+v", extra)
+	}
+}
+
+func TestStreamClipboardImageWindowsToMac(t *testing.T) {
+	h := newStream(t)
+	ws := h.connect()
+	pngData := samplePNG(t)
+	setFakeClipboardImage(pngData)
+	got := h.read(ws)
+	if got.Type != "clipboardImage" {
+		t.Fatalf("got %+v, want clipboardImage", got)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(got.Image)
+	if err != nil || !bytes.Equal(decoded, pngData) {
+		t.Fatalf("decoded image mismatch err=%v", err)
+	}
+}
+
+func TestStreamAwakeFramePulsesKeepAwake(t *testing.T) {
+	h := newStream(t)
+	ws := h.connect()
+	on := true
+	h.send(ws, inputFrame{Type: "awake", Awake: &on})
+	waitFor(t, "keep-awake pulse", func() bool {
+		return awakePulses() >= 1
+	})
 }

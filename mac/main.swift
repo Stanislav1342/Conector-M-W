@@ -146,6 +146,7 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
     var paused = false
     var window: ConnectionWindow!
     var pauseItem: NSMenuItem!
+    var lockItem: NSMenuItem!
     var disconnectItem: NSMenuItem!
     var inputState: Bool?
     var attemptedTap = false
@@ -158,8 +159,12 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
     let cue = HandoffCue()
     var keyboard = RemoteKeyboard(commandIsControl: true)
     var pointer = PointerMotion(speed: 1)
+    var scrollMotion = ScrollMotion(smoothness: 0.6)
+    var swipeDetector = ThreeFingerSwipeDetector()
     var capturedBounds = CGRect.zero
     var lastWarp = Date.distantPast
+    var lastActivateAttempt = Date.distantPast
+    var captureAnchor: NSPanel?
     var handoffConfirmed = false
     var remote = false
     var previousApp: NSRunningApplication?
@@ -172,7 +177,10 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
     var localKeys: Set<Int64> = []
     var lastClipboardChangeCount = NSPasteboard.general.changeCount
     var lastClipboardCheck = Date.distantPast
-    var lastSyncedClipboard: String?
+    var lastSyncedClipboardHash: Data?
+    var macLocked = false
+    var lastSentAwake: Bool?
+    var lockObservers: [NSObjectProtocol] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
@@ -192,8 +200,10 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         menu.addItem(status)
         menu.addItem(menuItem("Открыть Conector-M-W", action: #selector(showWindow)))
         pauseItem = menuItem("Приостановить управление", action: #selector(togglePause))
+        lockItem = menuItem("Заблокировать Windows", action: #selector(lockWindows))
         disconnectItem = menuItem("Отключить Windows", action: #selector(disconnect))
         menu.addItem(pauseItem)
+        menu.addItem(lockItem)
         menu.addItem(disconnectItem)
         menu.addItem(.separator())
         menu.addItem(updateItem)
@@ -222,6 +232,58 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         discovery.start()
         window.model.updates.onChange = { [weak self] in self?.refreshUpdateItem() }
         window.model.updates.start()
+        installLockObservers()
+    }
+
+    func installLockObservers() {
+        let distributed = DistributedNotificationCenter.default()
+        lockObservers.append(distributed.addObserver(forName: NSNotification.Name("com.apple.screenIsLocked"), object: nil, queue: .main) { [weak self] _ in
+            self?.handleMacLocked()
+        })
+        lockObservers.append(distributed.addObserver(forName: NSNotification.Name("com.apple.screenIsUnlocked"), object: nil, queue: .main) { [weak self] _ in
+            self?.handleMacUnlocked()
+        })
+        let workspace = NSWorkspace.shared.notificationCenter
+        lockObservers.append(workspace.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.handleMacLocked()
+        })
+        lockObservers.append(workspace.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.handleMacUnlocked()
+        })
+    }
+
+    func handleMacLocked() {
+        macLocked = true
+        if remote { leave(reason: "Mac locked") }
+        syncAwakeIfNeeded()
+        if linked && controlSettings.lockWindowsOnMacLock {
+            lockWindows()
+        }
+    }
+
+    func handleMacUnlocked() {
+        macLocked = false
+        syncAwakeIfNeeded()
+    }
+
+    func syncAwakeIfNeeded() {
+        guard linked, let channel, channel.ready else { return }
+        let desired = !macLocked && controlSettings.keepWindowsAwake
+        guard desired != lastSentAwake else { return }
+        lastSentAwake = desired
+        channel.sendAwake(desired)
+    }
+
+    @objc func lockWindows() {
+        guard let active = connection,
+              var components = URLComponents(url: active.url, resolvingAgainstBaseURL: false) else { return }
+        components.path = "/power/lock"
+        guard let lockURL = components.url else { return }
+        if remote { leave(reason: "lock windows") }
+        let powerConnection = Connection(url: lockURL, code: powerCode(accessCode: active.code), fingerprint: active.fingerprint)
+        powerConnection.perform(method: "POST") { [weak self] result in
+            self?.log.record("lock windows \(result.description)")
+        }
     }
 
     lazy var updateItem: NSMenuItem = menuItem("Проверить обновления…", action: #selector(showUpdates))
@@ -448,10 +510,12 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         attemptedTap = false
         lastSend = Date()
         lastClipboardChangeCount = NSPasteboard.general.changeCount
-        lastSyncedClipboard = nil
+        lastSyncedClipboardHash = nil
+        lastSentAwake = nil
         retryDelay = 3
         refreshPermissions()
         updateControlStatus()
+        syncAwakeIfNeeded()
         do {
             let saved = try profiles.remember(name: credentials.name, host: credentials.host,
                                                id: credentials.id, secrets: PCSecrets(code: credentials.code,
@@ -505,6 +569,8 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             leave(reason: "Windows edge")
         case "clipboard":
             if let text = message.text { applyRemoteClipboard(text) }
+        case "clipboardImage":
+            if let image = message.image { applyRemoteClipboardImage(image) }
         case "inputUnavailable": connectionFailed(.http(503))
         case "invalid": connectionFailed(.failure(.cannotParseResponse))
         default: break
@@ -614,6 +680,7 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         status.title = state.title
         pauseItem.isEnabled = linked
         pauseItem.title = paused ? "Возобновить управление" : "Приостановить управление"
+        lockItem.isEnabled = linked
         disconnectItem.isEnabled = connection != nil
         window.render(state)
     }
@@ -639,9 +706,18 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             if let reconnect, controlSettings.autoConnect { beginConnection(reconnect) }
         }
         channel?.heartbeat(now: now, capturing: remote)
+        if remote, (!cursorHidden || !cursorDetached), now.timeIntervalSince(lastActivateAttempt) >= 0.1 {
+            lastActivateAttempt = now
+            if !NSApp.isActive {
+                showCaptureAnchor()
+                NSApp.activate(ignoringOtherApps: true)
+            }
+            updateRemoteCursor()
+        }
         if now.timeIntervalSince(lastInputCheck) >= 1 {
             lastInputCheck = now
             if window.isVisible || linked { refreshPermissions() }
+            syncAwakeIfNeeded()
         }
         if linked, now.timeIntervalSince(lastClipboardCheck) >= 0.25 {
             lastClipboardCheck = now
@@ -652,27 +728,70 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
 
     func syncLocalClipboardIfNeeded() {
         guard linked, controlSettings.clipboardSync, let channel, channel.ready else { return }
-        let count = NSPasteboard.general.changeCount
+        let pb = NSPasteboard.general
+        let count = pb.changeCount
         guard count != lastClipboardChangeCount else { return }
         lastClipboardChangeCount = count
-        guard let raw = NSPasteboard.general.string(forType: .string) else {
-            lastSyncedClipboard = nil
+        if let raw = pb.string(forType: .string) {
+            let normalized = normalizeClipboardText(raw)
+            guard !normalized.isEmpty, normalized.utf8.count <= maxClipboardBytes else { return }
+            let digest = clipboardHash(kind: "text", payload: Data(normalized.utf8))
+            guard digest != lastSyncedClipboardHash else { return }
+            lastSyncedClipboardHash = digest
+            channel.sendClipboard(normalized)
             return
         }
-        let normalized = normalizeClipboardText(raw)
-        guard !normalized.isEmpty, normalized.utf8.count <= maxClipboardBytes, normalized != lastSyncedClipboard else { return }
-        lastSyncedClipboard = normalized
-        channel.sendClipboard(normalized)
+        let pngData: Data?
+        if let png = pb.data(forType: .png) {
+            pngData = png
+        } else if let tiff = pb.data(forType: .tiff),
+                  let rep = NSBitmapImageRep(data: tiff) {
+            pngData = rep.representation(using: .png, properties: [:])
+        } else {
+            pngData = nil
+        }
+        guard let pngData, !pngData.isEmpty, pngData.count <= maxClipboardImageBytes else {
+            lastSyncedClipboardHash = nil
+            return
+        }
+        let digest = clipboardHash(kind: "image", payload: pngData)
+        guard digest != lastSyncedClipboardHash else { return }
+        lastSyncedClipboardHash = digest
+        channel.sendClipboardImage(pngData)
     }
 
     func applyRemoteClipboard(_ text: String) {
         guard controlSettings.clipboardSync else { return }
         let normalized = normalizeClipboardText(text)
         guard !normalized.isEmpty, normalized.utf8.count <= maxClipboardBytes else { return }
-        lastSyncedClipboard = normalized
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(normalized, forType: .string)
-        lastClipboardChangeCount = NSPasteboard.general.changeCount
+        lastSyncedClipboardHash = clipboardHash(kind: "text", payload: Data(normalized.utf8))
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(normalized, forType: .string)
+        lastClipboardChangeCount = pb.changeCount
+    }
+
+    func applyRemoteClipboardImage(_ base64: String) {
+        guard controlSettings.clipboardSync,
+              let pngData = Data(base64Encoded: base64),
+              !pngData.isEmpty, pngData.count <= maxClipboardImageBytes,
+              let image = NSImage(data: pngData) else { return }
+        lastSyncedClipboardHash = clipboardHash(kind: "image", payload: pngData)
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setData(pngData, forType: .png)
+        if let tiff = image.tiffRepresentation {
+            pb.setData(tiff, forType: .tiff)
+        }
+        lastClipboardChangeCount = pb.changeCount
+    }
+
+    private func clipboardHash(kind: String, payload: Data) -> Data {
+        var hasher = SHA256()
+        hasher.update(data: Data(kind.utf8))
+        hasher.update(data: Data([0]))
+        hasher.update(data: payload)
+        return Data(hasher.finalize())
     }
 
     func installTap() -> Bool {
@@ -680,7 +799,8 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         let types: [CGEventType] = [.mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged,
                                     .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp,
                                     .otherMouseDown, .otherMouseUp, .scrollWheel, .keyDown, .keyUp, .flagsChanged]
-        let mask = types.reduce(CGEventMask(0)) { $0 | (1 << $1.rawValue) }
+        var mask = types.reduce(CGEventMask(0)) { $0 | (1 << $1.rawValue) }
+        mask |= CGEventMask(1) << 29 // NSEventTypeGesture (trackpad multi-finger touches)
         guard let port = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap,
                                            options: .defaultTap, eventsOfInterest: mask,
                                            callback: { _, type, event, context in
@@ -712,6 +832,7 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         ready = false
         sending = false
         edgePush = 0
+        lastSentAwake = nil
         pending.removeAll()
         localButtons.removeAll()
         localKeys.removeAll()
@@ -771,9 +892,11 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         guard remote else { return }
         remote = false
         edgePush = 0
+        swipeDetector.reset()
         if handoffConfirmed && controlSettings.animate { cue.show(at: entry, entering: false) }
         handoffConfirmed = false
         pending = [Input(kind: "release")]
+        captureAnchor?.orderOut(nil)
         if cursorDetached { CGAssociateMouseAndMouseCursorPosition(1) }
         if cursorHidden { CGDisplayShowCursor(CGMainDisplayID()) }
         cursorDetached = false
@@ -793,12 +916,34 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         updateRemoteCursor()
     }
 
+    func showCaptureAnchor() {
+        if captureAnchor == nil {
+            let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 1, height: 1),
+                                styleMask: [.borderless], backing: .buffered, defer: false)
+            panel.isOpaque = false
+            panel.backgroundColor = .clear
+            panel.alphaValue = 0.01
+            panel.hasShadow = false
+            panel.ignoresMouseEvents = true
+            panel.hidesOnDeactivate = false
+            panel.level = .floating
+            panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
+            captureAnchor = panel
+        }
+        if let main = NSScreen.screens.first {
+            let origin = NSPoint(x: capturedBounds.midX, y: main.frame.maxY - capturedBounds.midY)
+            captureAnchor?.setFrameOrigin(origin)
+        }
+        captureAnchor?.orderFrontRegardless()
+    }
+
     func updateRemoteCursor() {
-        guard remote, NSApp.isActive else { return }
-        if !cursorHidden { cursorHidden = CGDisplayHideCursor(CGMainDisplayID()) == .success }
+        guard remote else { return }
         if !cursorDetached {
             cursorDetached = CGAssociateMouseAndMouseCursorPosition(0) == .success
         }
+        guard NSApp.isActive else { return }
+        if !cursorHidden { cursorHidden = CGDisplayHideCursor(CGMainDisplayID()) == .success }
     }
 
     func warpForCapture() {
@@ -814,6 +959,17 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             pending[last].y = min(10000, max(-10000, pending[last].y + movement.y))
         } else {
             pending.append(Input(kind: "move", x: movement.x, y: movement.y))
+        }
+    }
+
+    func enqueueScroll(x: Double, y: Double, continuous: Bool) {
+        let delta = scrollMotion.scale(x: x, y: y, continuous: continuous)
+        guard delta.x != 0 || delta.y != 0 else { return }
+        if let last = pending.indices.last, pending[last].kind == "scroll" {
+            pending[last].x = min(10000, max(-10000, pending[last].x + delta.x))
+            pending[last].y = min(10000, max(-10000, pending[last].y + delta.y))
+        } else {
+            pending.append(Input(kind: "scroll", x: delta.x, y: delta.y))
         }
     }
 
@@ -870,6 +1026,7 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         let dy = Int32(clamping: event.getIntegerValueField(.mouseEventDeltaY))
         let button = UInt16(clamping: event.getIntegerValueField(.mouseEventButtonNumber))
         if !remote {
+            if type.rawValue == 29 { return original }
             switch type {
             case .leftMouseDown, .rightMouseDown, .otherMouseDown: localButtons.insert(button)
             case .leftMouseUp, .rightMouseUp, .otherMouseUp: localButtons.remove(button)
@@ -879,7 +1036,7 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             }
             guard type == .mouseMoved else { return original }
             let heldModifiers: CGEventFlags = [.maskShift, .maskControl, .maskAlternate, .maskCommand]
-            guard ready, pending.isEmpty, dy < 0, localButtons.isEmpty, localKeys.isEmpty,
+            guard ready, pending.isEmpty, dy < 0, abs(dx) <= -dy, localButtons.isEmpty, localKeys.isEmpty,
                   event.flags.intersection(heldModifiers).isEmpty else {
                 edgePush = 0
                 return original
@@ -894,7 +1051,7 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             if now.timeIntervalSince(lastEdgePush) > 0.25 { edgePush = 0 }
             lastEdgePush = now
             edgePush += max(-100, dy)
-            guard edgePush <= -8 else { return original }
+            guard edgePush <= -36 else { return original }
             edgePush = 0
             remote = true
             captureID &+= 1
@@ -904,17 +1061,21 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             handoffConfirmed = false
             capturedBounds = bounds
             pointer = PointerMotion(speed: controlSettings.speed)
+            scrollMotion = ScrollMotion(smoothness: controlSettings.scrollSmoothness)
+            swipeDetector.reset()
             keyboard = RemoteKeyboard(commandIsControl: controlSettings.commandIsControl,
                                       commandSpaceSwitchesLanguage: controlSettings.commandSpaceSwitchesLanguage)
             lastWarp = .distantPast
+            lastActivateAttempt = .distantPast
             entry = CGPoint(x: event.location.x, y: bounds.minY)
             let frontmost = NSWorkspace.shared.frontmostApplication
             previousApp = frontmost?.processIdentifier == ProcessInfo.processInfo.processIdentifier ? nil : frontmost
-            // Keep the setup window from being raised when Conector-M-W takes focus for capture.
+            // Keep the setup window from being raised while providing an invisible activation anchor.
+            showCaptureAnchor()
             window.orderOut(nil)
             NSApp.activate(ignoringOtherApps: true)
             updateRemoteCursor()
-            if !cursorDetached { warpForCapture() }
+            warpForCapture()
             log.record("control entered Windows")
             updateControlStatus()
             syncLocalClipboardIfNeeded()
@@ -925,8 +1086,28 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             leave(reason: "escape shortcut")
             return nil
         }
+        if type == .keyDown, key == 37, controlSettings.commandLLocksWindows,
+           event.getIntegerValueField(.keyboardEventAutorepeat) == 0,
+           event.flags.contains(.maskCommand),
+           event.flags.intersection([.maskShift, .maskControl, .maskAlternate]).isEmpty {
+            lockWindows()
+            return nil
+        }
         if pending.count >= 512 {
             leave(reason: "input queue full")
+            return nil
+        }
+        if type.rawValue == 29 {
+            let touches = NSEvent(cgEvent: event)?.touches(matching: .touching, in: nil) ?? []
+            let count = touches.count
+            let avgX = count > 0 ? touches.reduce(0.0) { $0 + $1.normalizedPosition.x } / Double(count) : 0
+            let avgY = count > 0 ? touches.reduce(0.0) { $0 + $1.normalizedPosition.y } / Double(count) : 0
+            if let direction = swipeDetector.update(touchCount: count, x: avgX, y: avgY, now: Date().timeIntervalSinceReferenceDate) {
+                let sequence = swipeKeySequence(direction: direction,
+                                                horizontalAction: controlSettings.threeFingerSwipeAction,
+                                                upEnabled: controlSettings.threeFingerSwipeUp)
+                if !sequence.isEmpty { pending.append(contentsOf: sequence) }
+            }
             return nil
         }
         switch type {
@@ -945,9 +1126,14 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
                 pending.append(Input(kind: "button", code: button, down: down))
             }
         case .scrollWheel:
-            let x = event.getIntegerValueField(.scrollWheelEventPointDeltaAxis2)
-            let y = event.getIntegerValueField(.scrollWheelEventPointDeltaAxis1)
-            pending.append(Input(kind: "scroll", x: Int32(clamping: -x * 4), y: Int32(clamping: y * 4)))
+            let continuous = event.getIntegerValueField(.scrollWheelEventIsContinuous) != 0
+            let rawX = continuous
+                ? event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2)
+                : Double(event.getIntegerValueField(.scrollWheelEventDeltaAxis2))
+            let rawY = continuous
+                ? event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1)
+                : Double(event.getIntegerValueField(.scrollWheelEventDeltaAxis1))
+            enqueueScroll(x: -rawX, y: rawY, continuous: continuous)
         case .keyDown, .keyUp, .flagsChanged:
             let down = type == .flagsChanged ? event.flags.rawValue & (modifierMasks[key] ?? 0) != 0 : type == .keyDown
             pending.append(contentsOf: keyboard.events(for: key, down: down, flagsChanged: type == .flagsChanged))
