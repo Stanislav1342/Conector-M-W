@@ -538,10 +538,25 @@ private struct SettingsView: View {
                 Toggle("Привычные сочетания Mac (текст и скриншот ⌘+Shift+4/5 → Print Screen)", isOn: $model.settings.macShortcuts)
                 Toggle("⌘ + Пробел переключает язык на Windows", isOn: $model.settings.commandSpaceSwitchesLanguage)
                 Toggle("⌘ + L блокирует Windows", isOn: $model.settings.commandLLocksWindows)
+                HStack {
+                    Text("Курсор и прокрутка как на MacBook")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("По умолчанию") {
+                        model.settings.speed = ControlSettings.defaultCursorSpeed
+                        model.settings.scrollSmoothness = ControlSettings.defaultScrollSmoothness
+                    }
+                    .secondaryActionStyle()
+                    .controlSize(.small)
+                    .disabled(
+                        abs(model.settings.speed - ControlSettings.defaultCursorSpeed) < 0.01 &&
+                        abs(model.settings.scrollSmoothness - ControlSettings.defaultScrollSmoothness) < 0.01
+                    )
+                }
                 LabeledContent("Скорость курсора Windows") {
                     HStack(spacing: 10) {
                         Image(systemName: "tortoise").foregroundStyle(.secondary)
-                        Slider(value: $model.settings.speed, in: 0.4...2.0)
+                        Slider(value: $model.settings.speed, in: 0.2...2.0)
                             .frame(width: 180)
                             .accessibilityLabel("Скорость курсора Windows")
                         Image(systemName: "hare").foregroundStyle(.secondary)

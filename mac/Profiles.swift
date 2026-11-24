@@ -17,6 +17,9 @@ struct PCSecrets: Codable, Equatable {
 }
 
 struct ControlSettings {
+    static let defaultCursorSpeed: Double = 0.50
+    static let defaultScrollSmoothness: Double = 1.50
+
     private let defaults = UserDefaults.standard
 
     var autoConnect: Bool {
@@ -40,11 +43,11 @@ struct ControlSettings {
         set { defaults.set(newValue, forKey: "clipboardSync") }
     }
     var speed: Double {
-        get { defaults.object(forKey: "cursorSpeed") as? Double ?? 1 }
+        get { defaults.object(forKey: "cursorSpeed") as? Double ?? Self.defaultCursorSpeed }
         set { defaults.set(newValue, forKey: "cursorSpeed") }
     }
     var scrollSmoothness: Double {
-        get { defaults.object(forKey: "scrollSmoothness") as? Double ?? 1.0 }
+        get { defaults.object(forKey: "scrollSmoothness") as? Double ?? Self.defaultScrollSmoothness }
         set { defaults.set(newValue, forKey: "scrollSmoothness") }
     }
     var commandLLocksWindows: Bool {

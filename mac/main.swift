@@ -1,7 +1,13 @@
 import AppKit
+import Carbon.HIToolbox
 import CryptoKit
 import Darwin
 import Security
+
+private final class CaptureKeyPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
 
 final class Pin: NSObject, URLSessionDelegate, @unchecked Sendable {
     let fingerprint: String
@@ -138,6 +144,10 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
     let discovery = Discovery()
     var tap: CFMachPort?
     var tapSource: CFRunLoopSource?
+    var gestureTap: CFMachPort?
+    var gestureTapSource: CFRunLoopSource?
+    var captureKeyEvents = 0
+    var secureInputWarned = false
     var timer: Timer?
     var sending = false
     var ready = false
@@ -1044,6 +1054,9 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
                 updateRemoteCursor()
             }
         }
+        if remote, !secureInputWarned, IsSecureEventInputEnabled() {
+            warnSecureInput()
+        }
         if !remote, now.timeIntervalSince(lastInputCheck) >= ((window.isVisible || !ready) ? 1.0 : 5.0) {
             lastInputCheck = now
             if window.isVisible || linked { refreshPermissions() }
@@ -1161,34 +1174,39 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
                                     .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp,
                                     .otherMouseDown, .otherMouseUp, .scrollWheel, .keyDown, .keyUp, .flagsChanged]
         let baseMask = types.reduce(CGEventMask(0)) { $0 | (1 << $1.rawValue) }
-        let fullMask = Self.gestureEventTypes.reduce(baseMask) { $0 | (CGEventMask(1) << UInt64($1)) }
-        let attempts: [(CGEventTapLocation, CGEventMask, String)] = [
-            (.cghidEventTap, fullMask, "hid-full"),
-            (.cgSessionEventTap, fullMask, "session-full"),
-            (.cgSessionEventTap, baseMask | (CGEventMask(1) << 29), "session-basic"),
-        ]
-        var createdPort: CFMachPort?
-        var createdMode = ""
         let userInfo = Unmanaged.passUnretained(self).toOpaque()
-        for (location, mask, mode) in attempts {
-            if let port = CGEvent.tapCreate(tap: location, place: .headInsertEventTap,
-                                            options: .defaultTap, eventsOfInterest: mask,
-                                            callback: { _, type, event, context in
-                guard let context else { return Unmanaged.passUnretained(event) }
-                return Unmanaged<ConectorApp>.fromOpaque(context).takeUnretainedValue().handle(type, event)
-            }, userInfo: userInfo) {
-                createdPort = port
-                createdMode = mode
-                break
-            }
+        let callback: CGEventTapCallBack = { _, type, event, context in
+            guard let context else { return Unmanaged.passUnretained(event) }
+            return Unmanaged<ConectorApp>.fromOpaque(context).takeUnretainedValue().handle(type, event)
         }
-        guard let port = createdPort else { return false }
+        guard let port = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap,
+                                           options: .defaultTap, eventsOfInterest: baseMask,
+                                           callback: callback, userInfo: userInfo) else {
+            return false
+        }
         let source = CFMachPortCreateRunLoopSource(nil, port, 0)
         tap = port
         tapSource = source
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: port, enable: true)
-        log.record("input tap mode=\(createdMode)")
+
+        let gestureMask = Self.gestureEventTypes.reduce(CGEventMask(0)) { $0 | (CGEventMask(1) << UInt64($1)) }
+        var gestureMode = "session-only"
+        for (location, mode) in [(CGEventTapLocation.cghidEventTap, "session+hid-gestures"),
+                                 (CGEventTapLocation.cgSessionEventTap, "session+session-gestures")] {
+            if let gPort = CGEvent.tapCreate(tap: location, place: .headInsertEventTap,
+                                             options: .defaultTap, eventsOfInterest: gestureMask,
+                                             callback: callback, userInfo: userInfo) {
+                let gSource = CFMachPortCreateRunLoopSource(nil, gPort, 0)
+                gestureTap = gPort
+                gestureTapSource = gSource
+                CFRunLoopAddSource(CFRunLoopGetMain(), gSource, .commonModes)
+                CGEvent.tapEnable(tap: gPort, enable: true)
+                gestureMode = mode
+                break
+            }
+        }
+        log.record("input tap mode=\(gestureMode)")
         return true
     }
 
@@ -1197,6 +1215,10 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         if let tap { CFMachPortInvalidate(tap) }
         tap = nil
         tapSource = nil
+        if let source = gestureTapSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes) }
+        if let gestureTap { CFMachPortInvalidate(gestureTap) }
+        gestureTap = nil
+        gestureTapSource = nil
     }
 
     func stop() {
@@ -1303,7 +1325,7 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         previousApp = nil
         log.record("control returned to Mac reason=\(reason)")
         if channel != nil {
-            log.record("stream capture frames=\(captureFrames) peakQueue=\(capturePeakQueue) peakWriteUs=\(capturePeakWrite / 1000)")
+            log.record("stream capture frames=\(captureFrames) keys=\(captureKeyEvents) peakQueue=\(capturePeakQueue) peakWriteUs=\(capturePeakWrite / 1000)")
         }
         updateControlStatus()
     }
@@ -1332,10 +1354,18 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         return setProp(cid, cid, "SetsCursorInBackground" as CFString, kCFBooleanTrue) == .success
     }
 
+    func warnSecureInput() {
+        guard !secureInputWarned else { return }
+        secureInputWarned = true
+        log.record("warning: macOS Secure Event Input is active — keyboard events blocked")
+        fileDropBar.showStatus("⚠ macOS блокирует клавиатуру (активно поле пароля или Secure Input)",
+                               on: builtInScreen(), duration: 5.5)
+    }
+
     func showCaptureAnchor() {
         if captureAnchor == nil {
-            let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 1, height: 1),
-                                styleMask: [.borderless], backing: .buffered, defer: false)
+            let panel = CaptureKeyPanel(contentRect: NSRect(x: 0, y: 0, width: 1, height: 1),
+                                        styleMask: [.borderless], backing: .buffered, defer: false)
             panel.isOpaque = false
             panel.backgroundColor = .clear
             panel.alphaValue = 0.01
@@ -1350,7 +1380,7 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             let origin = NSPoint(x: capturedBounds.midX, y: main.frame.maxY - capturedBounds.midY)
             captureAnchor?.setFrameOrigin(origin)
         }
-        captureAnchor?.orderFrontRegardless()
+        captureAnchor?.makeKeyAndOrderFront(nil)
     }
 
     func reinforceRemoteCursor() {
@@ -1462,6 +1492,7 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             localKeys.removeAll()
             localButtons.removeAll()
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
+            if let gestureTap { CGEvent.tapEnable(tap: gestureTap, enable: true) }
             return original
         }
         let key = event.getIntegerValueField(.keyboardEventKeycode)
@@ -1537,6 +1568,8 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             remote = true
             captureID &+= 1
             captureFrames = 0
+            captureKeyEvents = 0
+            secureInputWarned = false
             capturePeakQueue = 0
             capturePeakWrite = 0
             handoffConfirmed = false
@@ -1559,6 +1592,9 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             showCaptureAnchor()
             window.orderOut(nil)
             NSApp.activate(ignoringOtherApps: true)
+            if IsSecureEventInputEnabled() {
+                warnSecureInput()
+            }
             updateRemoteCursor()
             warpForCapture()
             log.record("control entered Windows")
@@ -1576,15 +1612,18 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
            event.getIntegerValueField(.keyboardEventAutorepeat) == 0,
            event.flags.contains(.maskCommand),
            event.flags.intersection([.maskShift, .maskControl, .maskAlternate]).isEmpty {
+            captureKeyEvents += 1
             lockWindows()
             return nil
         }
         if type == .keyUp, suppressedShortcutKeys.remove(key) != nil {
+            captureKeyEvents += 1
             return nil
         }
         if type == .keyDown, (key == 21 || key == 23), controlSettings.macShortcuts,
            event.flags.contains([.maskCommand, .maskShift]),
            event.flags.intersection([.maskControl, .maskAlternate]).isEmpty {
+            captureKeyEvents += 1
             if event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
                 suppressedShortcutKeys.insert(key)
                 let releases = keyboard.releaseAllModifiers()
@@ -1691,6 +1730,7 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             }
             enqueueScroll(x: -rawX, y: rawY, continuous: continuous)
         case .keyDown, .keyUp, .flagsChanged:
+            captureKeyEvents += 1
             let down = type == .flagsChanged ? event.flags.rawValue & (modifierMasks[key] ?? 0) != 0 : type == .keyDown
             pending.append(contentsOf: keyboard.events(for: key, down: down, flagsChanged: type == .flagsChanged))
             immediateFlush = true

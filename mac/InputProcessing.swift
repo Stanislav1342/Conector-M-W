@@ -6,7 +6,7 @@ struct PointerMotion {
     private var remainderY = 0.0
 
     init(speed: Double) {
-        self.speed = speed.isFinite ? min(2, max(0.4, speed)) : 1
+        self.speed = speed.isFinite ? min(2, max(0.2, speed)) : 1
     }
 
     mutating func scale(x: Int32, y: Int32) -> (x: Int32, y: Int32) {

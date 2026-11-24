@@ -34,8 +34,8 @@ func key(_ code: UInt16, _ down: Bool) -> Input { Input(kind: "key", code: code,
 
 // MARK: - Pointer motion
 
-test("pointer speed is clamped to 0.4...2") {
-    expectEqual(PointerMotion(speed: 0.1).speed, 0.4)
+test("pointer speed is clamped to 0.2...2") {
+    expectEqual(PointerMotion(speed: 0.1).speed, 0.2)
     expectEqual(PointerMotion(speed: 5).speed, 2)
     expectEqual(PointerMotion(speed: .nan).speed, 1)
     expectEqual(PointerMotion(speed: .infinity).speed, 1)
