@@ -11,8 +11,11 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -377,6 +380,7 @@ func TestShortcutCombos(t *testing.T) {
 		"switchAppPrev":  3,
 		"browserForward": 2,
 		"browserBack":    2,
+		"snip":           3,
 	}
 	for action, wantLen := range expectedCounts {
 		if !validShortcutAction(action) {
@@ -386,6 +390,9 @@ func TestShortcutCombos(t *testing.T) {
 		if !ok || len(keys) != wantLen {
 			t.Fatalf("%s combo ok=%v len=%d, want %d", action, ok, len(keys), wantLen)
 		}
+	}
+	if !validShortcutAction("zoomIn") || !validShortcutAction("zoomOut") {
+		t.Fatal("zoomIn and zoomOut should be valid actions")
 	}
 	if validShortcutAction("unknown") {
 		t.Fatal("unknown shortcut should be invalid")
@@ -397,6 +404,10 @@ func TestShortcutCombos(t *testing.T) {
 	prev, _ := shortcutCombo("desktopPrev")
 	if !prev[1].extended || prev[1].vk != 0x5B || !prev[2].extended || prev[2].vk != 0x25 {
 		t.Fatalf("desktopPrev must mark Win and Left arrow as extended: %+v", prev)
+	}
+	snip, _ := shortcutCombo("snip")
+	if !snip[0].extended || snip[0].vk != 0x5B || snip[1].vk != 0xA0 || snip[2].vk != 0x53 {
+		t.Fatalf("snip combo mismatch: %+v", snip)
 	}
 }
 
@@ -410,21 +421,27 @@ func TestStreamShortcut(t *testing.T) {
 	}
 	h.send(ws, inputFrame{Type: "shortcut", Capture: 3, Action: "desktopPrev"})
 	h.send(ws, inputFrame{Type: "shortcut", Capture: 4, Action: "unknown"})
+	h.send(ws, inputFrame{Capture: 4, Events: []event{{Kind: "key", Code: 0x2a, Down: true}}})
+	waitFor(t, "shift held before snip", func() bool { return h.held(0x2a) })
+	h.send(ws, inputFrame{Type: "shortcut", Capture: 4, Action: "snip"})
 	h.send(ws, inputFrame{Type: "shortcut", Capture: 4, Action: "desktopNext"})
-	h.send(ws, inputFrame{Type: "shortcut", Capture: 4, Action: "showDesktop"})
-	waitFor(t, "two valid shortcuts", func() bool {
-		return len(sentShortcuts()) == 2
+	h.send(ws, inputFrame{Type: "shortcut", Capture: 4, Action: "zoomIn"})
+	waitFor(t, "three valid shortcuts", func() bool {
+		return len(sentShortcuts()) == 3
 	})
 	got := sentShortcuts()
-	if got[0] != "desktopNext" || got[1] != "showDesktop" {
-		t.Fatalf("shortcuts = %v, want [desktopNext showDesktop]", got)
+	if got[0] != "snip" || got[1] != "desktopNext" || got[2] != "zoomIn" {
+		t.Fatalf("shortcuts = %v, want [snip desktopNext zoomIn]", got)
+	}
+	if h.held(0x2a) {
+		t.Fatal("snip must release held modifiers first")
 	}
 	// Stream must still accept events after invalid/stale shortcut frames.
 	h.send(ws, inputFrame{Capture: 4, Events: []event{{Kind: "key", Code: 0x1e, Down: true}}})
 	waitFor(t, "key held after shortcut", func() bool { return h.held(0x1e) })
 }
 
-func TestDeviceInfoAdvertisesShortcutSupport(t *testing.T) {
+func TestDeviceInfoAdvertisesCapabilities(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/device", nil)
 	req.Header.Set("Authorization", "Bearer "+testToken)
 	rec := httptest.NewRecorder()
@@ -436,7 +453,168 @@ func TestDeviceInfoAdvertisesShortcutSupport(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &info); err != nil {
 		t.Fatal(err)
 	}
-	if info["stream"] != "1" || info["shortcut"] != "1" {
-		t.Fatalf("info = %+v, want stream=1 and shortcut=1", info)
+	if info["stream"] != "1" || info["shortcut"] != "1" || info["files"] != "1" {
+		t.Fatalf("info = %+v, want stream=1, shortcut=1, files=1", info)
+	}
+}
+
+func TestSanitizeFilenameAndUniquePath(t *testing.T) {
+	cases := map[string]string{
+		"../../etc/passwd":         "passwd",
+		`C:\Users\me\photo:1?.png`: "photo_1_.png",
+		"CON":                      "_CON",
+		"nul.txt":                  "_nul.txt",
+		"..":                       "file",
+		"":                         "file",
+		"%D0%9E%D1%82%D1%87%D1%91%D1%82%202026.pdf": "Отчёт 2026.pdf",
+	}
+	for raw, want := range cases {
+		if got := sanitizeFilename(raw); got != want {
+			t.Fatalf("sanitizeFilename(%q) = %q, want %q", raw, got, want)
+		}
+	}
+	dir := t.TempDir()
+	p1, n1, err := uniqueFilePath(dir, "doc.txt")
+	if err != nil || n1 != "doc.txt" || p1 != filepath.Join(dir, "doc.txt") {
+		t.Fatalf("first uniqueFilePath = (%q, %q, %v)", p1, n1, err)
+	}
+	if err := os.WriteFile(p1, []byte("1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p2, n2, err := uniqueFilePath(dir, "doc.txt")
+	if err != nil || n2 != "doc (2).txt" || p2 != filepath.Join(dir, "doc (2).txt") {
+		t.Fatalf("second uniqueFilePath = (%q, %q, %v)", p2, n2, err)
+	}
+}
+
+func TestFileUploadDeduplicatesSetsClipboardAndDoesNotEcho(t *testing.T) {
+	resetFake(t)
+	dir := t.TempDir()
+	clip := newClipboardBridge()
+	store := newFileStore()
+	ctrl := &sync.Mutex{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/stream", inputStreamWithBridge(context.Background(), newReceiver(), ctrl, testToken, clip, store))
+	mux.HandleFunc("/file", handleFileUpload(testToken, clip, store, func(string) (string, error) {
+		return dir, nil
+	}))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	ws, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http")+"/stream", http.Header{
+		"Authorization": []string{"Bearer " + testToken},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.Close()
+	var ready streamMessage
+	if err := ws.ReadJSON(&ready); err != nil || ready.Type != "ready" {
+		t.Fatalf("ready = %+v, err=%v", ready, err)
+	}
+
+	upload := func(body, filename string) int {
+		req, err := http.NewRequest(http.MethodPost, srv.URL+"/file", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+testToken)
+		req.Header.Set("X-Conector-Filename", filename)
+		req.Header.Set("X-Conector-Destination", "downloads")
+		req.Header.Set("X-Conector-Batch", "batch-1")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		_, _ = io.ReadAll(resp.Body)
+		return resp.StatusCode
+	}
+
+	// Unauthenticated upload must fail.
+	unauthReq, _ := http.NewRequest(http.MethodPost, srv.URL+"/file", strings.NewReader("x"))
+	if resp, err := http.DefaultClient.Do(unauthReq); err != nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauth status = %v err=%v, want 401", resp.StatusCode, err)
+	}
+
+	if code := upload("hello", "notes.txt"); code != http.StatusOK {
+		t.Fatalf("first upload = %d, want 200", code)
+	}
+	if code := upload("world", "notes.txt"); code != http.StatusOK {
+		t.Fatalf("second upload = %d, want 200", code)
+	}
+	data1, err := os.ReadFile(filepath.Join(dir, "notes.txt"))
+	if err != nil || string(data1) != "hello" {
+		t.Fatalf("notes.txt = %q, %v", data1, err)
+	}
+	data2, err := os.ReadFile(filepath.Join(dir, "notes (2).txt"))
+	if err != nil || string(data2) != "world" {
+		t.Fatalf("notes (2).txt = %q, %v", data2, err)
+	}
+	gotFiles := fakeClipboardFiles()
+	if len(gotFiles) != 2 {
+		t.Fatalf("clipboard files = %v, want 2 files in batch", gotFiles)
+	}
+
+	// Uploaded files placed in Windows clipboard must NOT echo back to Mac as fileOffer.
+	_ = ws.SetReadDeadline(time.Now().Add(350 * time.Millisecond))
+	var echo streamMessage
+	if err := ws.ReadJSON(&echo); err == nil {
+		t.Fatalf("unexpected fileOffer echo: %+v", echo)
+	}
+}
+
+func TestStreamClipboardFileOfferAndDownload(t *testing.T) {
+	resetFake(t)
+	srcDir := t.TempDir()
+	samplePath := filepath.Join(srcDir, "report.pdf")
+	if err := os.WriteFile(samplePath, []byte("pdf-bytes-123"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	clip := newClipboardBridge()
+	store := newFileStore()
+	ctrl := &sync.Mutex{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/stream", inputStreamWithBridge(context.Background(), newReceiver(), ctrl, testToken, clip, store))
+	mux.HandleFunc("/file/download", handleFileDownload(testToken, store))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	ws, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http")+"/stream", http.Header{
+		"Authorization": []string{"Bearer " + testToken},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.Close()
+	var ready streamMessage
+	if err := ws.ReadJSON(&ready); err != nil || ready.Type != "ready" {
+		t.Fatalf("ready = %+v, err=%v", ready, err)
+	}
+
+	setFakeClipboardFiles([]string{samplePath})
+	var msg streamMessage
+	_ = ws.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if err := ws.ReadJSON(&msg); err != nil {
+		t.Fatal(err)
+	}
+	if msg.Type != "fileOffer" || len(msg.Files) != 1 || msg.Files[0].Name != "report.pdf" || msg.Files[0].Size != 13 {
+		t.Fatalf("offer = %+v, want single report.pdf offer", msg)
+	}
+
+	dlReq, _ := http.NewRequest(http.MethodGet, srv.URL+"/file/download?id="+msg.Files[0].ID, nil)
+	dlReq.Header.Set("Authorization", "Bearer "+testToken)
+	resp, err := http.DefaultClient.Do(dlReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("download status = %d, want 200", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil || string(body) != "pdf-bytes-123" {
+		t.Fatalf("downloaded body = %q, %v", body, err)
 	}
 }

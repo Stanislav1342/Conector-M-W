@@ -73,6 +73,26 @@ struct ControlSettings {
         get { defaults.object(forKey: "threeFingerSwipeDown") as? Bool ?? true }
         set { defaults.set(newValue, forKey: "threeFingerSwipeDown") }
     }
+    var pinchToZoom: Bool {
+        get { defaults.object(forKey: "pinchToZoom") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "pinchToZoom") }
+    }
+    var macShortcuts: Bool {
+        get { defaults.object(forKey: "macShortcuts") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "macShortcuts") }
+    }
+    var fileTransferEnabled: Bool {
+        get { defaults.object(forKey: "fileTransferEnabled") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "fileTransferEnabled") }
+    }
+    var clipboardFileSync: Bool {
+        get { defaults.object(forKey: "clipboardFileSync") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "clipboardFileSync") }
+    }
+    var fileDestination: String {
+        get { defaults.string(forKey: "fileDestination") ?? "downloads" }
+        set { defaults.set(newValue, forKey: "fileDestination") }
+    }
 }
 
 final class Profiles {

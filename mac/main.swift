@@ -133,7 +133,7 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
     var capturePeakWrite: UInt64 = 0
     var reconnect: ConnectionWindow.Credentials?
     var retryAt: Date?
-    var retryDelay: TimeInterval = 3
+    var retryDelay: TimeInterval = 0.8
     var reconnectPaused = false
     let discovery = Discovery()
     var tap: CFMachPort?
@@ -147,6 +147,8 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
     var paused = false
     var window: ConnectionWindow!
     var pauseItem: NSMenuItem!
+    var sendFileItem: NSMenuItem!
+    var receiveFileItem: NSMenuItem!
     var lockItem: NSMenuItem!
     var disconnectItem: NSMenuItem!
     var inputState: Bool?
@@ -157,16 +159,27 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
     let profiles = Profiles()
     let controlSettings = ControlSettings()
     let cue = HandoffCue()
+    let fileDropBar = FileDropBar()
+    var fileTransfer: FileTransfer?
+    var receiverSupportsShortcuts = false
+    var receiverSupportsFiles = false
+    var backgroundCursorEnabled = false
     var keyboard = RemoteKeyboard(commandIsControl: true)
     var pointer = PointerMotion(speed: 1)
     var scrollMotion = ScrollMotion(smoothness: 1.0)
     var swipeDetector = ThreeFingerSwipeDetector()
-    var receiverSupportsShortcuts = false
-    var backgroundCursorEnabled = false
+    var pinchDetector = PinchZoomDetector()
+    var suppressedShortcutKeys: Set<Int64> = []
     private static let gestureEventTypes: Set<UInt32> = [18, 19, 20, 29, 30, 31, 32, 33, 34, 37, 38]
     var capturedBounds = CGRect.zero
     var lastWarp = Date.distantPast
     var lastActivateAttempt = Date.distantPast
+    var lastReinforce = Date.distantPast
+    var lastDragProbe = Date.distantPast
+    var pendingDropHide: DispatchWorkItem?
+    var offeredWindowsFiles: [OfferedFile] = []
+    var offerGeneration: UInt64 = 0
+    let clipboardQueue = DispatchQueue(label: "com.stanislav1342.conector-m-w.clipboard", qos: .utility)
     var captureAnchor: NSPanel?
     var handoffConfirmed = false
     var remote = false
@@ -205,9 +218,14 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         menu.addItem(status)
         menu.addItem(menuItem("Открыть Conector-M-W", action: #selector(showWindow)))
         pauseItem = menuItem("Приостановить управление", action: #selector(togglePause))
+        sendFileItem = menuItem("Отправить файл на Windows…", action: #selector(pickAndSendFiles))
+        receiveFileItem = menuItem("Сохранить файл с Windows", action: #selector(downloadOfferedFiles))
+        receiveFileItem.isHidden = true
         lockItem = menuItem("Заблокировать Windows", action: #selector(lockWindows))
         disconnectItem = menuItem("Отключить Windows", action: #selector(disconnect))
         menu.addItem(pauseItem)
+        menu.addItem(sendFileItem)
+        menu.addItem(receiveFileItem)
         menu.addItem(lockItem)
         menu.addItem(disconnectItem)
         menu.addItem(.separator())
@@ -215,6 +233,10 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         menu.addItem(menuItem("Скопировать журнал", action: #selector(copyDiagnostics)))
         menu.addItem(menuItem("Выйти из Conector-M-W", action: #selector(quit)))
         item.menu = menu
+
+        fileDropBar.onDrop = { [weak self] urls in
+            self?.sendFilesToWindows(urls, destination: nil)
+        }
 
         timer = Timer(timeInterval: 0.008, repeats: true) { [weak self] _ in self?.tick() }
         if let timer { RunLoop.main.add(timer, forMode: .common) }
@@ -477,6 +499,10 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
                     return
                 }
                 self.receiverSupportsShortcuts = capabilities?["shortcut"] == "1"
+                self.receiverSupportsFiles = capabilities?["files"] == "1"
+                self.fileTransfer = self.receiverSupportsFiles
+                    ? FileTransfer(url: attempt.url, code: credentials.code, fingerprint: credentials.fingerprint)
+                    : nil
                 let wake = WakeTarget(mac: capabilities?["mac"] ?? "", broadcast: capabilities?["broadcast"] ?? "")
                 self.channel = stream
                 stream.onMessage = { [weak self, weak stream] event in
@@ -518,9 +544,10 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         lastClipboardChangeCount = NSPasteboard.general.changeCount
         lastSyncedClipboardHash = nil
         lastSentAwake = nil
-        retryDelay = 3
+        retryDelay = 0.8
         refreshPermissions()
         updateControlStatus()
+        refreshFileMenuItems()
         syncAwakeIfNeeded()
         do {
             let saved = try profiles.remember(name: credentials.name, host: credentials.host,
@@ -556,7 +583,7 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             if reconnect != nil && controlSettings.autoConnect {
                 reconnectPaused = wasPaused
                 retryAt = Date().addingTimeInterval(retryDelay)
-                retryDelay = min(retryDelay * 2, 20)
+                retryDelay = min(retryDelay * 2, 15)
                 display(.error(connectionMessage(result) + " Conector-M-W попробует подключиться снова."))
                 return
             }
@@ -577,6 +604,8 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             if let text = message.text { applyRemoteClipboard(text) }
         case "clipboardImage":
             if let image = message.image { applyRemoteClipboardImage(image) }
+        case "fileOffer":
+            if let files = message.files, !files.isEmpty { handleRemoteFileOffer(files) }
         case "inputUnavailable": connectionFailed(.http(503))
         case "invalid": connectionFailed(.failure(.cannotParseResponse))
         default: break
@@ -686,9 +715,223 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         status.title = state.title
         pauseItem.isEnabled = linked
         pauseItem.title = paused ? "Возобновить управление" : "Приостановить управление"
+        refreshFileMenuItems()
         lockItem.isEnabled = linked
         disconnectItem.isEnabled = connection != nil
         window.render(state)
+    }
+
+    func refreshFileMenuItems() {
+        sendFileItem?.isEnabled = linked && receiverSupportsFiles
+        guard let receiveFileItem else { return }
+        if !linked || !receiverSupportsFiles || offeredWindowsFiles.isEmpty {
+            receiveFileItem.isHidden = true
+            return
+        }
+        receiveFileItem.isHidden = false
+        if offeredWindowsFiles.count == 1, let first = offeredWindowsFiles.first {
+            receiveFileItem.title = "Сохранить с Windows: \(first.name) (\(FileTransfer.formatBytes(first.size)))"
+        } else {
+            let total = offeredWindowsFiles.reduce(Int64(0)) { $0 + $1.size }
+            receiveFileItem.title = "Сохранить с Windows: \(offeredWindowsFiles.count) файлов (\(FileTransfer.formatBytes(total)))"
+        }
+    }
+
+    private func builtInScreen() -> NSScreen? {
+        let targetID = CGGetOnlineBuiltInDisplay()
+        return NSScreen.screens.first {
+            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == targetID
+        } ?? NSScreen.main ?? NSScreen.screens.first
+    }
+
+    private func fileDestinationLabel() -> String {
+        controlSettings.fileDestination == "desktop" ? "Рабочий стол" : "Загрузки"
+    }
+
+    @objc func pickAndSendFiles() {
+        guard linked, receiverSupportsFiles else { return }
+        if remote { leave(reason: "file picker") }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Отправить на Windows"
+        NSApp.activate(ignoringOtherApps: true)
+        if panel.runModal() == .OK, !panel.urls.isEmpty {
+            sendFilesToWindows(panel.urls, destination: nil)
+        }
+    }
+
+    @objc func downloadOfferedFiles() {
+        guard linked, receiverSupportsFiles, let transfer = fileTransfer, !offeredWindowsFiles.isEmpty else { return }
+        let downloadsDir = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads", isDirectory: true)
+        let batch = offeredWindowsFiles
+        fileDropBar.showStatus("Скачиваем \(batch.count == 1 ? batch[0].name : "\(batch.count) файлов") в «Загрузки»…",
+                               on: builtInScreen(), duration: 2.5)
+        downloadBatch(batch, using: transfer, into: downloadsDir) { [weak self] saved, firstError in
+            guard let self else { return }
+            if !saved.isEmpty {
+                let text = saved.count == 1
+                    ? "Сохранено в «Загрузки»: \(saved[0].lastPathComponent)"
+                    : "Сохранено в «Загрузки»: \(saved.count) файлов"
+                self.fileDropBar.showStatus(text, on: self.builtInScreen(), duration: 3.0)
+                self.log.record("downloaded \(saved.count) file(s) from Windows")
+            } else if let firstError {
+                self.fileDropBar.showStatus("Не удалось скачать файл: \(firstError.localizedDescription)",
+                                            on: self.builtInScreen(), duration: 3.0)
+            }
+        }
+    }
+
+    private func downloadBatch(_ files: [OfferedFile], using transfer: FileTransfer, into directory: URL,
+                               index: Int = 0, saved: [URL] = [], firstError: Error? = nil,
+                               completion: @escaping ([URL], Error?) -> Void) {
+        if index >= files.count {
+            completion(saved, firstError)
+            return
+        }
+        transfer.download(file: files[index], into: directory) { [weak self] result in
+            guard let self else { return }
+            var nextSaved = saved
+            var nextErr = firstError
+            switch result {
+            case .success(let url):
+                nextSaved.append(url)
+            case .failure(let error):
+                if nextErr == nil { nextErr = error }
+            }
+            self.downloadBatch(files, using: transfer, into: directory, index: index + 1,
+                               saved: nextSaved, firstError: nextErr, completion: completion)
+        }
+    }
+
+    private func filterRegularFiles(_ urls: [URL], maxBytes: Int64 = 512 * 1024 * 1024,
+                                    limit: Int = 20) -> [(url: URL, size: Int64, mtime: TimeInterval)] {
+        let fm = FileManager.default
+        var valid: [(url: URL, size: Int64, mtime: TimeInterval)] = []
+        for url in urls.prefix(limit) {
+            guard url.isFileURL,
+                  let attrs = try? fm.attributesOfItem(atPath: url.path),
+                  (attrs[.type] as? FileAttributeType) == .typeRegular,
+                  let size = (attrs[.size] as? NSNumber)?.int64Value,
+                  size >= 0, size <= maxBytes else { continue }
+            let mtime = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+            valid.append((url, size, mtime))
+        }
+        return valid
+    }
+
+    func sendFilesToWindows(_ urls: [URL], destination: String?, setClipboard: Bool = true, silent: Bool = false) {
+        guard linked, receiverSupportsFiles, let transfer = fileTransfer else { return }
+        let items = filterRegularFiles(urls)
+        guard items.count == urls.prefix(20).count, !items.isEmpty else {
+            if !silent {
+                fileDropBar.showStatus("Можно отправлять только файлы (без папок, до 512 МБ)",
+                                       on: builtInScreen(), duration: 2.8)
+            }
+            return
+        }
+        let dest = destination ?? controlSettings.fileDestination
+        let batchID = UUID().uuidString
+        if !silent {
+            let label = items.count == 1 ? items[0].url.lastPathComponent : "\(items.count) файлов"
+            fileDropBar.showStatus("Отправляем на Windows: \(label)…", on: builtInScreen(), duration: 2.5)
+        }
+        uploadBatch(items.map(\.url), using: transfer, destination: dest,
+                    setClipboard: setClipboard, batchID: batchID) { [weak self] uploaded, firstError in
+            guard let self else { return }
+            if !uploaded.isEmpty {
+                self.log.record("uploaded \(uploaded.count) file(s) dest=\(dest)")
+                if !silent {
+                    let text = uploaded.count == 1
+                        ? "Отправлено в «\(self.fileDestinationLabel())»: \(uploaded[0])"
+                        : "Отправлено на Windows: \(uploaded.count) файлов"
+                    self.fileDropBar.showStatus(text, on: self.builtInScreen(), duration: 2.8)
+                }
+            } else if let firstError {
+                self.log.record("file upload failed: \(firstError.localizedDescription)")
+                if !silent {
+                    self.fileDropBar.showStatus("Ошибка отправки: \(firstError.localizedDescription)",
+                                                on: self.builtInScreen(), duration: 3.0)
+                }
+            }
+        }
+    }
+
+    private func uploadBatch(_ urls: [URL], using transfer: FileTransfer, destination: String,
+                             setClipboard: Bool, batchID: String, index: Int = 0,
+                             uploaded: [String] = [], firstError: Error? = nil,
+                             completion: @escaping ([String], Error?) -> Void) {
+        if index >= urls.count {
+            completion(uploaded, firstError)
+            return
+        }
+        transfer.upload(fileURL: urls[index], destination: destination,
+                        setClipboard: setClipboard, batchID: batchID) { [weak self] result in
+            guard let self else { return }
+            var nextUploaded = uploaded
+            var nextErr = firstError
+            switch result {
+            case .success(let savedName):
+                nextUploaded.append(savedName)
+            case .failure(let error):
+                if nextErr == nil { nextErr = error }
+            }
+            self.uploadBatch(urls, using: transfer, destination: destination,
+                             setClipboard: setClipboard, batchID: batchID,
+                             index: index + 1, uploaded: nextUploaded,
+                             firstError: nextErr, completion: completion)
+        }
+    }
+
+    private func receivedClipboardCacheDirectory() -> URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Caches/Conector-M-W/Received", isDirectory: true)
+    }
+
+    private func pruneOldReceivedFiles(in directory: URL) {
+        let fm = FileManager.default
+        guard let contents = try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.contentModificationDateKey],
+                                                         options: [.skipsHiddenFiles]) else { return }
+        let cutoff = Date().addingTimeInterval(-3600)
+        for item in contents {
+            if let values = try? item.resourceValues(forKeys: [.contentModificationDateKey]),
+               let modified = values.contentModificationDate, modified < cutoff {
+                try? fm.removeItem(at: item)
+            }
+        }
+    }
+
+    func handleRemoteFileOffer(_ files: [OfferedFile]) {
+        offerGeneration &+= 1
+        let generation = offerGeneration
+        offeredWindowsFiles = files
+        refreshFileMenuItems()
+        guard controlSettings.clipboardSync, controlSettings.clipboardFileSync,
+              receiverSupportsFiles, let transfer = fileTransfer else { return }
+        let total = files.reduce(Int64(0)) { $0 + $1.size }
+        guard total > 0 else { return }
+        guard total <= 25 * 1024 * 1024 else {
+            if let first = files.first {
+                fileDropBar.showStatus("С Windows доступен файл \(first.name) (\(FileTransfer.formatBytes(total))) — скачайте из меню",
+                                       on: builtInScreen(), duration: 3.5)
+            }
+            return
+        }
+        let cacheDir = receivedClipboardCacheDirectory()
+        pruneOldReceivedFiles(in: cacheDir)
+        downloadBatch(files, using: transfer, into: cacheDir) { [weak self] saved, _ in
+            guard let self, self.linked, self.offerGeneration == generation, !saved.isEmpty else { return }
+            let items = self.filterRegularFiles(saved, maxBytes: 25 * 1024 * 1024)
+            let meta = items.map { "\($0.url.path)|\($0.size)|\($0.mtime)" }.sorted().joined(separator: "\n")
+            self.lastSyncedClipboardHash = self.clipboardHash(kind: "files", payload: Data(meta.utf8))
+            let pb = NSPasteboard.general
+            pb.clearContents()
+            pb.writeObjects(saved as [NSURL])
+            self.lastClipboardChangeCount = pb.changeCount
+            self.log.record("synced \(saved.count) file(s) from Windows clipboard")
+        }
     }
 
     func updateControlStatus() {
@@ -742,6 +985,25 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         let count = pb.changeCount
         guard count != lastClipboardChangeCount else { return }
         lastClipboardChangeCount = count
+
+        if receiverSupportsFiles && controlSettings.clipboardFileSync,
+           let urls = pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
+           !urls.isEmpty {
+            let fileURLs = urls.filter { $0.isFileURL }
+            let valid = filterRegularFiles(fileURLs, maxBytes: 25 * 1024 * 1024)
+            let totalSize = valid.reduce(Int64(0)) { $0 + $1.size }
+            guard valid.count == fileURLs.prefix(20).count, !valid.isEmpty, totalSize <= 25 * 1024 * 1024 else {
+                lastSyncedClipboardHash = nil
+                return
+            }
+            let meta = valid.map { "\($0.url.path)|\($0.size)|\($0.mtime)" }.sorted().joined(separator: "\n")
+            let digest = clipboardHash(kind: "files", payload: Data(meta.utf8))
+            guard digest != lastSyncedClipboardHash else { return }
+            lastSyncedClipboardHash = digest
+            sendFilesToWindows(valid.map(\.url), destination: "clipboard", setClipboard: true, silent: true)
+            return
+        }
+
         if let raw = pb.string(forType: .string) {
             let normalized = normalizeClipboardText(raw)
             guard !normalized.isEmpty, normalized.utf8.count <= maxClipboardBytes else { return }
@@ -751,23 +1013,35 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             channel.sendClipboard(normalized)
             return
         }
-        let pngData: Data?
-        if let png = pb.data(forType: .png) {
-            pngData = png
-        } else if let tiff = pb.data(forType: .tiff),
-                  let rep = NSBitmapImageRep(data: tiff) {
-            pngData = rep.representation(using: .png, properties: [:])
-        } else {
-            pngData = nil
-        }
-        guard let pngData, !pngData.isEmpty, pngData.count <= maxClipboardImageBytes else {
+
+        let rawPNG = pb.data(forType: .png)
+        let rawTIFF = rawPNG == nil ? pb.data(forType: .tiff) : nil
+        guard rawPNG != nil || rawTIFF != nil else {
             lastSyncedClipboardHash = nil
             return
         }
-        let digest = clipboardHash(kind: "image", payload: pngData)
-        guard digest != lastSyncedClipboardHash else { return }
-        lastSyncedClipboardHash = digest
-        channel.sendClipboardImage(pngData)
+        clipboardQueue.async { [weak self, weak channel] in
+            guard let self else { return }
+            let pngData: Data?
+            if let rawPNG {
+                pngData = rawPNG
+            } else if let rawTIFF, let rep = NSBitmapImageRep(data: rawTIFF) {
+                pngData = rep.representation(using: .png, properties: [:])
+            } else {
+                pngData = nil
+            }
+            guard let pngData, !pngData.isEmpty, pngData.count <= maxClipboardImageBytes else {
+                DispatchQueue.main.async { self.lastSyncedClipboardHash = nil }
+                return
+            }
+            let digest = self.clipboardHash(kind: "image", payload: pngData)
+            DispatchQueue.main.async {
+                guard let channel, channel.ready, self.channel === channel,
+                      digest != self.lastSyncedClipboardHash else { return }
+                self.lastSyncedClipboardHash = digest
+                channel.sendClipboardImage(pngData)
+            }
+        }
     }
 
     func applyRemoteClipboard(_ text: String) {
@@ -852,18 +1126,28 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         leave(reason: "disconnect")
         channel?.close()
         channel = nil
+        fileTransfer?.invalidate()
+        fileTransfer = nil
         connection = nil
         linked = false
         paused = false
         ready = false
         sending = false
         receiverSupportsShortcuts = false
+        receiverSupportsFiles = false
+        offeredWindowsFiles.removeAll()
+        suppressedShortcutKeys.removeAll()
+        pendingDropHide?.cancel()
+        pendingDropHide = nil
+        fileDropBar.hideDropZone()
         topEdgePush.reset()
+        pinchDetector.reset()
         lastSentAwake = nil
         pending.removeAll()
         localButtons.removeAll()
         localKeys.removeAll()
         removeTap()
+        refreshFileMenuItems()
     }
 
     func stopAndRelease() {
@@ -920,9 +1204,12 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         remote = false
         topEdgePush.reset()
         swipeDetector.reset()
+        pinchDetector.reset()
+        suppressedShortcutKeys.removeAll()
         if handoffConfirmed && controlSettings.animate { cue.show(at: entry, entering: false) }
         handoffConfirmed = false
         pending = [Input(kind: "release")]
+        flushIfIdle()
         captureAnchor?.orderOut(nil)
         CGAssociateMouseAndMouseCursorPosition(1)
         if cursorHidden { CGDisplayShowCursor(CGMainDisplayID()) }
@@ -1005,7 +1292,7 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
     }
 
     func warpForCapture() {
-        CGWarpMouseCursorPosition(CGPoint(x: capturedBounds.midX, y: capturedBounds.midY))
+        CGWarpMouseCursorPosition(CGPoint(x: floor(capturedBounds.midX), y: floor(capturedBounds.midY)))
         lastWarp = Date()
     }
 
@@ -1031,9 +1318,15 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
         }
     }
 
+    func flushIfIdle() {
+        if !pending.isEmpty && !sending {
+            flush()
+        }
+    }
+
     func flush() {
         guard let connection, linked, !sending,
-              !pending.isEmpty || Date().timeIntervalSince(lastSend) > (remote ? 0.4 : 5) else { return }
+              !pending.isEmpty || Date().timeIntervalSince(lastSend) > (remote ? 0.5 : 5) else { return }
         if remote { capturePeakQueue = max(capturePeakQueue, pending.count) }
         let batch = Array(pending.prefix(128))
         pending.removeFirst(batch.count)
@@ -1049,6 +1342,9 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
                     self.capturePeakWrite = max(self.capturePeakWrite, DispatchTime.now().uptimeNanoseconds - writeStart)
                 }
                 self.sending = false
+                if !self.pending.isEmpty {
+                    self.flush()
+                }
             }
             return
         }
@@ -1092,6 +1388,39 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             case .keyUp: localKeys.remove(key)
             default: break
             }
+            if linked, receiverSupportsFiles, controlSettings.fileTransferEnabled {
+                if type == .leftMouseDragged {
+                    let bounds = CGDisplayBounds(CGGetOnlineBuiltInDisplay())
+                    if bounds.width > 0, event.location.x >= bounds.minX, event.location.x < bounds.maxX {
+                        if event.location.y <= bounds.minY + 48 {
+                            if !fileDropBar.isShowingDropZone {
+                                let now = Date()
+                                if now.timeIntervalSince(lastDragProbe) >= 0.08 {
+                                    lastDragProbe = now
+                                    let dragPB = NSPasteboard(name: .drag)
+                                    if dragPB.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]),
+                                       let screen = builtInScreen() {
+                                        pendingDropHide?.cancel()
+                                        pendingDropHide = nil
+                                        fileDropBar.showDropZone(near: event.location.x, on: screen, destinationLabel: fileDestinationLabel())
+                                    }
+                                }
+                            }
+                        } else if event.location.y > bounds.minY + 150, fileDropBar.isShowingDropZone {
+                            pendingDropHide?.cancel()
+                            pendingDropHide = nil
+                            fileDropBar.hideDropZone()
+                        }
+                    }
+                } else if type == .leftMouseUp, fileDropBar.isShowingDropZone {
+                    pendingDropHide?.cancel()
+                    let hideWork = DispatchWorkItem { [weak self] in
+                        self?.fileDropBar.hideDropZone()
+                    }
+                    pendingDropHide = hideWork
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: hideWork)
+                }
+            }
             guard type == .mouseMoved else { return original }
             let heldModifiers: CGEventFlags = [.maskShift, .maskControl, .maskAlternate, .maskCommand]
             guard ready, pending.isEmpty, localButtons.isEmpty, localKeys.isEmpty,
@@ -1115,10 +1444,14 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             pointer = PointerMotion(speed: controlSettings.speed)
             scrollMotion = ScrollMotion(smoothness: controlSettings.scrollSmoothness)
             swipeDetector.reset()
+            pinchDetector.reset()
+            suppressedShortcutKeys.removeAll()
             keyboard = RemoteKeyboard(commandIsControl: controlSettings.commandIsControl,
-                                      commandSpaceSwitchesLanguage: controlSettings.commandSpaceSwitchesLanguage)
+                                      commandSpaceSwitchesLanguage: controlSettings.commandSpaceSwitchesLanguage,
+                                      macShortcuts: controlSettings.macShortcuts)
             lastWarp = .distantPast
             lastActivateAttempt = .distantPast
+            lastReinforce = .distantPast
             entry = CGPoint(x: event.location.x, y: bounds.minY)
             let frontmost = NSWorkspace.shared.frontmostApplication
             previousApp = frontmost?.processIdentifier == ProcessInfo.processInfo.processIdentifier ? nil : frontmost
@@ -1132,6 +1465,7 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             updateControlStatus()
             syncLocalClipboardIfNeeded()
             pending.append(Input(kind: "enter", x: entryPosition(x: entry.x, in: bounds)))
+            flushIfIdle()
             return nil
         }
         if type == .keyDown, key == 53, event.flags.contains([.maskControl, .maskAlternate]) {
@@ -1143,6 +1477,34 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
            event.flags.contains(.maskCommand),
            event.flags.intersection([.maskShift, .maskControl, .maskAlternate]).isEmpty {
             lockWindows()
+            return nil
+        }
+        if type == .keyUp, suppressedShortcutKeys.remove(key) != nil {
+            return nil
+        }
+        if type == .keyDown, (key == 21 || key == 23), controlSettings.macShortcuts,
+           event.flags.contains([.maskCommand, .maskShift]),
+           event.flags.intersection([.maskControl, .maskAlternate]).isEmpty {
+            if event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
+                suppressedShortcutKeys.insert(key)
+                let releases = keyboard.releaseAllModifiers()
+                if !releases.isEmpty { pending.append(contentsOf: releases) }
+                if receiverSupportsShortcuts {
+                    flushIfIdle()
+                    channel?.sendShortcut("snip", capture: captureID)
+                    log.record("shortcut snip")
+                } else {
+                    pending.append(contentsOf: [
+                        Input(kind: "key", code: 0x15b, down: true),
+                        Input(kind: "key", code: 0x2a, down: true),
+                        Input(kind: "key", code: 0x1f, down: true),
+                        Input(kind: "key", code: 0x1f, down: false),
+                        Input(kind: "key", code: 0x2a, down: false),
+                        Input(kind: "key", code: 0x15b, down: false),
+                    ])
+                    flushIfIdle()
+                }
+            }
             return nil
         }
         if pending.count >= 512 {
@@ -1169,7 +1531,25 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
                                                         horizontalAction: controlSettings.threeFingerSwipeAction,
                                                         upEnabled: controlSettings.threeFingerSwipeUp,
                                                         downEnabled: controlSettings.threeFingerSwipeDown)
-                        if !sequence.isEmpty { pending.append(contentsOf: sequence) }
+                        if !sequence.isEmpty {
+                            pending.append(contentsOf: sequence)
+                            flushIfIdle()
+                        }
+                    }
+                }
+            }
+            return nil
+        }
+        if type.rawValue == 30 {
+            if controlSettings.pinchToZoom && receiverSupportsShortcuts {
+                let isDockSwipe = CGEventField(rawValue: 110).map { event.getIntegerValueField($0) == 23 } ?? false
+                if !isDockSwipe, let nsEvent = NSEvent(cgEvent: event), nsEvent.type == .magnify {
+                    let ended = nsEvent.phase == .ended || nsEvent.phase == .cancelled
+                    if let action = pinchDetector.update(magnification: Double(nsEvent.magnification),
+                                                         ended: ended,
+                                                         now: Date().timeIntervalSinceReferenceDate) {
+                        channel?.sendShortcut(action, capture: captureID)
+                        log.record("pinch -> \(action)")
                     }
                 }
             }
@@ -1185,10 +1565,15 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             if !recentWarp || max(abs(Int64(dx)), abs(Int64(dy))) < 120 {
                 enqueueMotion(x: dx, y: dy)
             }
-            let center = CGPoint(x: capturedBounds.midX, y: capturedBounds.midY)
-            if !recentWarp && (!cursorDetached || abs(event.location.x - center.x) > 4 || abs(event.location.y - center.y) > 4) {
+            let centerX = floor(capturedBounds.midX)
+            let centerY = floor(capturedBounds.midY)
+            if !recentWarp && (!cursorDetached || abs(event.location.x - centerX) > 24 || abs(event.location.y - centerY) > 24) {
                 warpForCapture()
-                reinforceRemoteCursor()
+                let now = Date()
+                if !cursorDetached || now.timeIntervalSince(lastReinforce) >= 0.25 {
+                    lastReinforce = now
+                    reinforceRemoteCursor()
+                }
             }
         case .leftMouseDown, .rightMouseDown, .otherMouseDown, .leftMouseUp, .rightMouseUp, .otherMouseUp:
             if button <= 2 {
@@ -1214,6 +1599,7 @@ final class ConectorApp: NSObject, NSApplicationDelegate {
             pending.append(contentsOf: keyboard.events(for: key, down: down, flagsChanged: type == .flagsChanged))
         default: break
         }
+        flushIfIdle()
         return nil
     }
 }

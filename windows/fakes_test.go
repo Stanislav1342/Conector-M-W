@@ -4,6 +4,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 )
@@ -19,6 +21,8 @@ var fake struct {
 	clipHasText  bool
 	clipImage    []byte
 	clipHasImage bool
+	clipFiles    []string
+	clipHasFiles bool
 	awakePulses  int
 	shortcuts    []string
 }
@@ -48,6 +52,10 @@ func loadPairing() (pairing, error) { return pairing{}, nil }
 func lockWindows() error            { return nil }
 func showError(string)              {}
 func runTray(*trayApp)              {}
+
+func resolveFileDestination(dest string) (string, error) {
+	return filepath.Join(os.TempDir(), "conector-test", dest), nil
+}
 
 func pulseKeepAwake() {
 	fake.mu.Lock()
@@ -90,6 +98,9 @@ func getClipboardSequenceNumber() uint32 {
 func getClipboardContent() (clipboardItem, bool, error) {
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
+	if fake.clipHasFiles {
+		return clipboardItem{kind: "files", files: append([]string(nil), fake.clipFiles...)}, true, nil
+	}
 	if fake.clipHasText {
 		return clipboardItem{kind: "text", text: fake.clipText}, true, nil
 	}
@@ -107,6 +118,8 @@ func setClipboardText(text string) error {
 	fake.clipHasText = true
 	fake.clipImage = nil
 	fake.clipHasImage = false
+	fake.clipFiles = nil
+	fake.clipHasFiles = false
 	return nil
 }
 
@@ -118,6 +131,21 @@ func setClipboardImage(pngData []byte) error {
 	fake.clipHasText = false
 	fake.clipImage = append([]byte(nil), pngData...)
 	fake.clipHasImage = true
+	fake.clipFiles = nil
+	fake.clipHasFiles = false
+	return nil
+}
+
+func setClipboardFiles(paths []string) error {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	fake.clipSeq++
+	fake.clipText = ""
+	fake.clipHasText = false
+	fake.clipImage = nil
+	fake.clipHasImage = false
+	fake.clipFiles = append([]string(nil), paths...)
+	fake.clipHasFiles = true
 	return nil
 }
 
@@ -127,6 +155,7 @@ func resetFake(t *testing.T) {
 	fake.sent, fake.failKey, fake.err, fake.bottom = nil, 0, nil, false
 	fake.clipSeq, fake.clipText, fake.clipHasText = 0, "", false
 	fake.clipImage, fake.clipHasImage = nil, false
+	fake.clipFiles, fake.clipHasFiles = nil, false
 	fake.awakePulses = 0
 	fake.shortcuts = nil
 	fake.mu.Unlock()
@@ -173,6 +202,20 @@ func setFakeClipboardImage(pngData []byte) {
 	fake.clipHasText = false
 	fake.clipImage = append([]byte(nil), pngData...)
 	fake.clipHasImage = true
+	fake.clipFiles = nil
+	fake.clipHasFiles = false
+	fake.mu.Unlock()
+}
+
+func setFakeClipboardFiles(paths []string) {
+	fake.mu.Lock()
+	fake.clipSeq++
+	fake.clipText = ""
+	fake.clipHasText = false
+	fake.clipImage = nil
+	fake.clipHasImage = false
+	fake.clipFiles = append([]string(nil), paths...)
+	fake.clipHasFiles = true
 	fake.mu.Unlock()
 }
 
@@ -186,4 +229,10 @@ func fakeClipboardImage() []byte {
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
 	return append([]byte(nil), fake.clipImage...)
+}
+
+func fakeClipboardFiles() []string {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	return append([]string(nil), fake.clipFiles...)
 }

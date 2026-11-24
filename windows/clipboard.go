@@ -2,6 +2,8 @@ package main
 
 import (
 	"crypto/sha256"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -12,6 +14,7 @@ type clipboardItem struct {
 	kind  string
 	text  string
 	image []byte
+	files []string
 }
 
 func normalizeClipboardNewlines(text string) string {
@@ -79,6 +82,38 @@ func (b *clipboardBridge) applyRemoteImage(pngData []byte) error {
 	return nil
 }
 
+func filesDigest(paths []string) ([32]byte, []string) {
+	cleaned := make([]string, 0, len(paths))
+	for _, p := range paths {
+		if c := strings.TrimSpace(p); c != "" {
+			cleaned = append(cleaned, filepath.Clean(c))
+		}
+	}
+	normalized := make([]string, len(cleaned))
+	copy(normalized, cleaned)
+	sort.Strings(normalized)
+	return clipboardDigest("files", []byte(strings.Join(normalized, "\x00"))), cleaned
+}
+
+func (b *clipboardBridge) applyRemoteFiles(paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	sum, cleaned := filesDigest(paths)
+	if len(cleaned) == 0 {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if err := setClipboardFiles(cleaned); err != nil {
+		return err
+	}
+	b.lastHash = sum
+	b.hasHash = true
+	b.lastSeq = getClipboardSequenceNumber()
+	return nil
+}
+
 func (b *clipboardBridge) pollLocal() (clipboardItem, bool) {
 	seq := getClipboardSequenceNumber()
 	b.mu.Lock()
@@ -103,6 +138,18 @@ func (b *clipboardBridge) pollLocal() (clipboardItem, bool) {
 		return clipboardItem{}, false
 	}
 	switch item.kind {
+	case "files":
+		sum, cleaned := filesDigest(item.files)
+		if len(cleaned) == 0 {
+			b.hasHash = false
+			return clipboardItem{}, false
+		}
+		if b.hasHash && sum == b.lastHash {
+			return clipboardItem{}, false
+		}
+		b.lastHash = sum
+		b.hasHash = true
+		return clipboardItem{kind: "files", files: cleaned}, true
 	case "text":
 		if len(item.text) == 0 || len(item.text) > maxClipboardBytes {
 			b.hasHash = false

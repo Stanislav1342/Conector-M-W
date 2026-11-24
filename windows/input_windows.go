@@ -116,6 +116,29 @@ func injectBatch(inputs []input) error {
 }
 
 func sendShortcut(action string) error {
+	if action == "zoomIn" || action == "zoomOut" {
+		wheel := int32(120)
+		if action == "zoomOut" {
+			wheel = -120
+		}
+		var ctrlDown input
+		ctrlDown.kind = 1
+		kd := (*keyboardInput)(unsafe.Pointer(&ctrlDown.mouse))
+		kd.virtualKey = 0xA2
+		kd.scanCode = 0x1D
+
+		var wheelInput input
+		wheelInput.mouse = mouseInput{data: uint32(wheel), flags: 0x0800}
+
+		var ctrlUp input
+		ctrlUp.kind = 1
+		ku := (*keyboardInput)(unsafe.Pointer(&ctrlUp.mouse))
+		ku.virtualKey = 0xA2
+		ku.scanCode = 0x1D
+		ku.flags = 2
+
+		return injectBatch([]input{ctrlDown, wheelInput, ctrlUp})
+	}
 	keys, ok := shortcutCombo(action)
 	if !ok {
 		return nil

@@ -42,6 +42,11 @@ var shortcutCombos = map[string][]shortcutKey{
 		{vk: 0xA4, scan: 0x38},                 // LAlt
 		{vk: 0x25, scan: 0x4B, extended: true}, // Left
 	},
+	"snip": {
+		{vk: 0x5B, scan: 0x5B, extended: true}, // LWin
+		{vk: 0xA0, scan: 0x2A},                 // LShift
+		{vk: 0x53, scan: 0x1F},                 // S
+	},
 }
 
 func shortcutCombo(action string) ([]shortcutKey, bool) {
@@ -50,6 +55,9 @@ func shortcutCombo(action string) ([]shortcutKey, bool) {
 }
 
 func validShortcutAction(action string) bool {
+	if action == "zoomIn" || action == "zoomOut" {
+		return true
+	}
 	_, ok := shortcutCombos[action]
 	return ok
 }

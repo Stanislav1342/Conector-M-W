@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
+	"path/filepath"
 	"runtime"
 	"sync"
 	"syscall"
@@ -14,12 +16,15 @@ import (
 const (
 	cfDIB         = 8
 	cfUnicodeText = 13
+	cfHDrop       = 15
 	gmemMoveable  = 0x0002
 	maxDIBBytes   = 32 << 20
 )
 
 var (
 	kernel32                   = syscall.NewLazyDLL("kernel32.dll")
+	shell32Clip                = syscall.NewLazyDLL("shell32.dll")
+	dragQueryFileW             = shell32Clip.NewProc("DragQueryFileW")
 	globalAlloc                = kernel32.NewProc("GlobalAlloc")
 	globalLock                 = kernel32.NewProc("GlobalLock")
 	globalUnlock               = kernel32.NewProc("GlobalUnlock")
@@ -157,7 +162,55 @@ func getClipboardText() (string, bool, error) {
 	return text, true, nil
 }
 
+func getClipboardFiles() ([]string, bool, error) {
+	avail, _, _ := isClipboardFormatAvailable.Call(cfHDrop)
+	if avail == 0 {
+		return nil, false, nil
+	}
+	if err := openClipboardWithRetry(); err != nil {
+		return nil, false, err
+	}
+	defer closeClipboard.Call()
+
+	hMem, _, err := getClipboardData.Call(cfHDrop)
+	if hMem == 0 {
+		if availNow, _, _ := isClipboardFormatAvailable.Call(cfHDrop); availNow == 0 {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("GetClipboardData(CF_HDROP): %v", err)
+	}
+	count, _, _ := dragQueryFileW.Call(hMem, 0xFFFFFFFF, 0, 0)
+	if count == 0 {
+		return nil, false, nil
+	}
+	if count > maxClipboardFileCount {
+		count = maxClipboardFileCount
+	}
+	paths := make([]string, 0, int(count))
+	for i := uintptr(0); i < count; i++ {
+		chars, _, _ := dragQueryFileW.Call(hMem, i, 0, 0)
+		if chars == 0 || chars > 32767 {
+			continue
+		}
+		buf := make([]uint16, int(chars)+1)
+		copied, _, _ := dragQueryFileW.Call(hMem, i, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+		if copied > 0 {
+			paths = append(paths, syscall.UTF16ToString(buf[:copied]))
+		}
+	}
+	if len(paths) == 0 {
+		return nil, false, nil
+	}
+	return paths, true, nil
+}
+
 func getClipboardContent() (clipboardItem, bool, error) {
+	if files, ok, err := getClipboardFiles(); err != nil {
+		return clipboardItem{}, false, err
+	} else if ok {
+		return clipboardItem{kind: "files", files: files}, true, nil
+	}
+
 	if text, ok, err := getClipboardText(); err != nil {
 		return clipboardItem{}, false, err
 	} else if ok {
@@ -287,6 +340,46 @@ func setClipboardImage(pngData []byte) error {
 		if res, _, _ := setClipboardData.Call(pngFmt, hPNG); res == 0 {
 			globalFree.Call(hPNG)
 		}
+	}
+	return nil
+}
+
+func setClipboardFiles(paths []string) error {
+	var payload []uint16
+	for _, p := range paths {
+		clean := filepath.Clean(p)
+		if clean == "" {
+			continue
+		}
+		payload = append(payload, utf16.Encode([]rune(clean))...)
+		payload = append(payload, 0)
+	}
+	if len(payload) == 0 {
+		return nil
+	}
+	payload = append(payload, 0)
+	raw := make([]byte, 20+len(payload)*2)
+	binary.LittleEndian.PutUint32(raw[0:4], 20)
+	binary.LittleEndian.PutUint32(raw[16:20], 1) // fWide = TRUE
+	for idx, u := range payload {
+		binary.LittleEndian.PutUint16(raw[20+idx*2:22+idx*2], u)
+	}
+	hMem, err := allocGlobalBytes(raw)
+	if err != nil {
+		return err
+	}
+	if err := openClipboardWithRetry(); err != nil {
+		globalFree.Call(hMem)
+		return err
+	}
+	defer closeClipboard.Call()
+	if ok, _, err := emptyClipboard.Call(); ok == 0 {
+		globalFree.Call(hMem)
+		return fmt.Errorf("EmptyClipboard: %v", err)
+	}
+	if res, _, err := setClipboardData.Call(cfHDrop, hMem); res == 0 {
+		globalFree.Call(hMem)
+		return fmt.Errorf("SetClipboardData(CF_HDROP): %v", err)
 	}
 	return nil
 }

@@ -307,8 +307,12 @@ func startReceiver(onServerError func(error)) (*receiverService, error) {
 
 	mux := http.NewServeMux()
 	var control sync.Mutex
-	mux.HandleFunc("/stream", inputStreamContext(ctx, r, &control, token))
+	clip := newClipboardBridge()
+	files := newFileStore()
+	mux.HandleFunc("/stream", inputStreamWithBridge(ctx, r, &control, token, clip, files))
 	mux.HandleFunc("/device", deviceInfo(token))
+	mux.HandleFunc("/file", handleFileUpload(token, clip, files, resolveFileDestination))
+	mux.HandleFunc("/file/download", handleFileDownload(token, files))
 	invite.register(mux, token)
 	power := &powerController{lock: lockWindows}
 	power.register(mux, powerToken(token))

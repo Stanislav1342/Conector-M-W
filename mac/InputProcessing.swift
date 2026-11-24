@@ -184,24 +184,143 @@ func swipeKeySequence(direction: SwipeDirection, horizontalAction: ThreeFingerSw
            combo.reversed().map { Input(kind: "key", code: $0, down: false) }
 }
 
+struct PinchZoomDetector {
+    let step: Double
+    let cooldown: TimeInterval
+    let resetWindow: TimeInterval
+    private var accumulator = 0.0
+    private var lastTrigger: TimeInterval = -.infinity
+    private var lastUpdate: TimeInterval = -.infinity
+
+    init(step: Double = 0.14, cooldown: TimeInterval = 0.09, resetWindow: TimeInterval = 0.25) {
+        self.step = step
+        self.cooldown = cooldown
+        self.resetWindow = resetWindow
+    }
+
+    mutating func reset() {
+        accumulator = 0
+        lastUpdate = -.infinity
+    }
+
+    mutating func update(magnification: Double, ended: Bool, now: TimeInterval) -> String? {
+        if ended {
+            reset()
+            return nil
+        }
+        guard magnification.isFinite, abs(magnification) < 1.0 else { return nil }
+        if now - lastUpdate > resetWindow {
+            accumulator = 0
+        }
+        lastUpdate = now
+        accumulator += magnification
+        guard now - lastTrigger >= cooldown else {
+            accumulator = min(step, max(-step, accumulator))
+            return nil
+        }
+        if accumulator >= step {
+            accumulator = 0
+            lastTrigger = now
+            return "zoomIn"
+        }
+        if accumulator <= -step {
+            accumulator = 0
+            lastTrigger = now
+            return "zoomOut"
+        }
+        return nil
+    }
+}
+
 struct RemoteKeyboard {
     let commandIsControl: Bool
     let commandSpaceSwitchesLanguage: Bool
+    let macShortcuts: Bool
     private var held: [Int64: UInt16] = [:]
     private var physicalCommand: Set<Int64> = []
+    private var physicalOption: Set<Int64> = []
+    private var physicalShift: Set<Int64> = []
+    private var physicalControl: Set<Int64> = []
     private var suppressedCommand: [Int64: UInt16] = [:]
+    private var suppressedOption: [Int64: UInt16] = [:]
+    private var suppressedShiftControl: [Int64: UInt16] = [:]
+    private var optionWordCtrlActive = false
+    private var remappedKeys: [Int64: UInt16] = [:]
+    private var suppressedKeyUps: Set<Int64> = []
     private var languageSwitchActive = false
 
     private static let commandKeys: [Int64] = [55, 54]
+    private static let optionKeys: [Int64] = [58, 61]
+    private static let shiftKeys: Set<Int64> = [56, 60]
+    private static let controlKeys: Set<Int64> = [59, 62]
     private static let otherModifiers: Set<Int64> = [56, 60, 58, 61, 59, 62]
 
-    init(commandIsControl: Bool, commandSpaceSwitchesLanguage: Bool = true) {
+    init(commandIsControl: Bool, commandSpaceSwitchesLanguage: Bool = true, macShortcuts: Bool = true) {
         self.commandIsControl = commandIsControl
         self.commandSpaceSwitchesLanguage = commandSpaceSwitchesLanguage
+        self.macShortcuts = macShortcuts
     }
 
     private var otherModifierHeld: Bool {
         held.keys.contains { Self.otherModifiers.contains($0) }
+    }
+
+    mutating func releaseAllModifiers() -> [Input] {
+        var out: [Input] = []
+        if optionWordCtrlActive {
+            optionWordCtrlActive = false
+            if !held.values.contains(0x1d) {
+                out.append(Input(kind: "key", code: 0x1d, down: false))
+            }
+        }
+        let modifierOrder: [Int64] = [55, 54, 58, 61, 56, 60, 59, 62]
+        for modKey in modifierOrder {
+            guard let modCode = held.removeValue(forKey: modKey) else { continue }
+            if Self.commandKeys.contains(modKey) {
+                suppressedCommand[modKey] = modCode
+            } else if Self.optionKeys.contains(modKey) {
+                suppressedOption[modKey] = modCode
+            } else {
+                suppressedShiftControl[modKey] = modCode
+            }
+            if !held.values.contains(modCode) {
+                out.append(Input(kind: "key", code: modCode, down: false))
+            }
+        }
+        return out
+    }
+
+    private mutating func releaseSuppressedCommand() -> [Input] {
+        var ups: [Input] = []
+        for cmdKey in Self.commandKeys {
+            if let cmdCode = held.removeValue(forKey: cmdKey) {
+                suppressedCommand[cmdKey] = cmdCode
+                if !held.values.contains(cmdCode) {
+                    ups.append(Input(kind: "key", code: cmdCode, down: false))
+                }
+            }
+        }
+        return ups
+    }
+
+    private mutating func deactivateOptionWordCtrl() -> [Input] {
+        var seq: [Input] = []
+        if optionWordCtrlActive {
+            optionWordCtrlActive = false
+            if !held.values.contains(0x1d) {
+                seq.append(Input(kind: "key", code: 0x1d, down: false))
+            }
+        }
+        for optKey in Self.optionKeys {
+            if let optCode = suppressedOption.removeValue(forKey: optKey) {
+                let alreadyHeld = held.values.contains(optCode)
+                held[optKey] = optCode
+                if !alreadyHeld {
+                    seq.append(Input(kind: "key", code: optCode, down: true))
+                }
+            }
+        }
+        return seq
     }
 
     mutating func events(for key: Int64, down: Bool, flagsChanged: Bool) -> [Input] {
@@ -213,28 +332,62 @@ struct RemoteKeyboard {
         if key == 57 && flagsChanged {
             return [Input(kind: "key", code: code, down: true), Input(kind: "key", code: code)]
         }
-        if flagsChanged && (key == 55 || key == 54) {
-            if down {
-                physicalCommand.insert(key)
-            } else {
-                physicalCommand.remove(key)
-                if suppressedCommand.removeValue(forKey: key) != nil { return [] }
+        if flagsChanged {
+            if key == 55 || key == 54 {
+                if down {
+                    physicalCommand.insert(key)
+                } else {
+                    physicalCommand.remove(key)
+                    if suppressedCommand.removeValue(forKey: key) != nil { return [] }
+                }
+            } else if key == 58 || key == 61 {
+                if down {
+                    physicalOption.insert(key)
+                } else {
+                    physicalOption.remove(key)
+                    if suppressedOption.removeValue(forKey: key) != nil {
+                        if optionWordCtrlActive && physicalOption.isEmpty {
+                            optionWordCtrlActive = false
+                            if !held.values.contains(0x1d) {
+                                return [Input(kind: "key", code: 0x1d, down: false)]
+                            }
+                        }
+                        return []
+                    }
+                }
+            } else if Self.shiftKeys.contains(key) {
+                if down {
+                    physicalShift.insert(key)
+                } else {
+                    physicalShift.remove(key)
+                    if suppressedShiftControl.removeValue(forKey: key) != nil { return [] }
+                }
+            } else if Self.controlKeys.contains(key) {
+                if down {
+                    physicalControl.insert(key)
+                } else {
+                    physicalControl.remove(key)
+                    if suppressedShiftControl.removeValue(forKey: key) != nil { return [] }
+                }
             }
         }
+
+        if !flagsChanged && !down {
+            if let mappedCode = remappedKeys.removeValue(forKey: key) {
+                guard held.removeValue(forKey: key) != nil, !held.values.contains(mappedCode) else { return [] }
+                return [Input(kind: "key", code: mappedCode, down: false)]
+            }
+            if suppressedKeyUps.remove(key) != nil {
+                return []
+            }
+        }
+
         if key == 49 && !flagsChanged {
             if down {
                 if languageSwitchActive { return [] }
                 if commandSpaceSwitchesLanguage, !physicalCommand.isEmpty, !otherModifierHeld, held[49] == nil {
                     languageSwitchActive = true
-                    var releasedCmdUps: [Input] = []
-                    for cmdKey in Self.commandKeys {
-                        if let cmdCode = held.removeValue(forKey: cmdKey) {
-                            suppressedCommand[cmdKey] = cmdCode
-                            if !held.values.contains(cmdCode) {
-                                releasedCmdUps.append(Input(kind: "key", code: cmdCode, down: false))
-                            }
-                        }
-                    }
+                    let releasedCmdUps = releaseSuppressedCommand()
                     var sequence: [Input] = []
                     if commandIsControl {
                         sequence.append(contentsOf: releasedCmdUps)
@@ -253,7 +406,57 @@ struct RemoteKeyboard {
                 return [Input(kind: "key", code: 0x38, down: false), Input(kind: "key", code: 0x2a, down: false)]
             }
         }
+
+        if macShortcuts && down && !flagsChanged {
+            if commandIsControl && !physicalCommand.isEmpty && physicalOption.isEmpty && physicalControl.isEmpty {
+                if key == 123 || key == 124 {
+                    let mappedCode: UInt16 = (key == 123) ? 0x147 : 0x14f // Home / End
+                    let ups = releaseSuppressedCommand()
+                    remappedKeys[key] = mappedCode
+                    held[key] = mappedCode
+                    return ups + [Input(kind: "key", code: mappedCode, down: true)]
+                }
+                if key == 51 && physicalShift.isEmpty {
+                    if suppressedKeyUps.contains(51) { return [] }
+                    suppressedKeyUps.insert(51)
+                    let ups = releaseSuppressedCommand()
+                    return ups + [
+                        Input(kind: "key", code: 0x2a, down: true),
+                        Input(kind: "key", code: 0x147, down: true),
+                        Input(kind: "key", code: 0x147, down: false),
+                        Input(kind: "key", code: 0x2a, down: false),
+                        Input(kind: "key", code: 0x0e, down: true),
+                        Input(kind: "key", code: 0x0e, down: false),
+                    ]
+                }
+            }
+            if !physicalOption.isEmpty && physicalCommand.isEmpty && physicalControl.isEmpty &&
+                (key == 123 || key == 124 || (key == 51 && physicalShift.isEmpty)) {
+                var sequence: [Input] = []
+                if !optionWordCtrlActive {
+                    optionWordCtrlActive = true
+                    if !held.values.contains(0x1d) {
+                        sequence.append(Input(kind: "key", code: 0x1d, down: true))
+                    }
+                    for optKey in Self.optionKeys {
+                        if let optCode = held.removeValue(forKey: optKey) {
+                            suppressedOption[optKey] = optCode
+                            if !held.values.contains(optCode) {
+                                sequence.append(Input(kind: "key", code: optCode, down: false))
+                            }
+                        }
+                    }
+                }
+                held[key] = code
+                sequence.append(Input(kind: "key", code: code, down: true))
+                return sequence
+            }
+        }
+
         var prefix: [Input] = []
+        if down && !flagsChanged && optionWordCtrlActive {
+            prefix.append(contentsOf: deactivateOptionWordCtrl())
+        }
         if down, !languageSwitchActive, !suppressedCommand.isEmpty, !(flagsChanged && (key == 55 || key == 54)) {
             for cmdKey in Self.commandKeys {
                 if let cmdCode = suppressedCommand.removeValue(forKey: cmdKey) {
@@ -261,6 +464,17 @@ struct RemoteKeyboard {
                     held[cmdKey] = cmdCode
                     if !alreadyHeld {
                         prefix.append(Input(kind: "key", code: cmdCode, down: true))
+                    }
+                }
+            }
+        }
+        if down, !suppressedShiftControl.isEmpty, !flagsChanged {
+            for modKey in [56, 60, 59, 62] as [Int64] {
+                if let modCode = suppressedShiftControl.removeValue(forKey: modKey) {
+                    let alreadyHeld = held.values.contains(modCode)
+                    held[modKey] = modCode
+                    if !alreadyHeld {
+                        prefix.append(Input(kind: "key", code: modCode, down: true))
                     }
                 }
             }

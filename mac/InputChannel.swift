@@ -26,11 +26,18 @@ struct ShortcutFrame: Encodable {
     let action: String
 }
 
+struct OfferedFile: Decodable, Equatable {
+    let id: String
+    let name: String
+    let size: Int64
+}
+
 struct ChannelMessage: Decodable {
     let type: String
     let capture: UInt64?
     let text: String?
     let image: String?
+    let files: [OfferedFile]?
 }
 
 final class InputChannel {
@@ -49,8 +56,9 @@ final class InputChannel {
         url.path = "/stream"
         guard let endpoint = url.url else { return nil }
         let config = URLSessionConfiguration.ephemeral
+        config.networkServiceType = .responsiveData
         config.connectionProxyDictionary = [:]
-        config.timeoutIntervalForRequest = 12
+        config.timeoutIntervalForRequest = 15
         config.timeoutIntervalForResource = 7 * 24 * 60 * 60
         session = URLSession(configuration: config, delegate: Pin(connection.fingerprint), delegateQueue: nil)
         var request = URLRequest(url: endpoint)
@@ -80,12 +88,12 @@ final class InputChannel {
     func heartbeat(now: Date, capturing: Bool) {
         guard ready, !closed else { return }
         if let pendingPing {
-            if now.timeIntervalSince(pendingPing) >= (capturing ? 1.5 : 6) {
+            if now.timeIntervalSince(pendingPing) >= (capturing ? 5.0 : 10.0) {
                 fail(.failure(.timedOut))
             }
             return
         }
-        guard now.timeIntervalSince(lastPing) >= (capturing ? 0.45 : 3) else { return }
+        guard now.timeIntervalSince(lastPing) >= (capturing ? 1.0 : 4.0) else { return }
         lastPing = now
         pendingPing = now
         task.sendPing { [weak self] error in

@@ -509,6 +509,14 @@ private struct SettingsView: View {
             Section("Буфер обмена") {
                 Toggle("Общий буфер обмена (текст и скриншоты)", isOn: $model.settings.clipboardSync)
             }
+            Section("Передача файлов") {
+                Toggle("Перетаскивание файлов в верхний край на Windows", isOn: $model.settings.fileTransferEnabled)
+                Picker("Сохранять файлы на Windows в", selection: $model.settings.fileDestination) {
+                    Text("Загрузки").tag("downloads")
+                    Text("Рабочий стол").tag("desktop")
+                }
+                Toggle("Синхронизировать скопированные файлы через буфер (до 25 МБ)", isOn: $model.settings.clipboardFileSync)
+            }
             Section("Блокировка и экран") {
                 Toggle("Не давать Windows гасить экран, пока активен Mac", isOn: $model.settings.keepWindowsAwake)
                 Toggle("Блокировать Windows при блокировке Mac", isOn: $model.settings.lockWindowsOnMacLock)
@@ -522,9 +530,11 @@ private struct SettingsView: View {
                 }
                 Toggle("Свайп 3 пальцами вверх — обзор окон (Win + Tab)", isOn: $model.settings.threeFingerSwipeUp)
                 Toggle("Свайп 3 пальцами вниз — свернуть окна (Win + D)", isOn: $model.settings.threeFingerSwipeDown)
+                Toggle("Щипок двумя пальцами — масштаб (Ctrl + колёсико)", isOn: $model.settings.pinchToZoom)
             }
             Section {
                 Toggle("⌘ Command работает как Ctrl", isOn: $model.settings.commandIsControl)
+                Toggle("Привычные сочетания Mac (текст и скриншоты ⌘+Shift+4/5)", isOn: $model.settings.macShortcuts)
                 Toggle("⌘ + Пробел переключает язык на Windows", isOn: $model.settings.commandSpaceSwitchesLanguage)
                 Toggle("⌘ + L блокирует Windows", isOn: $model.settings.commandLLocksWindows)
                 LabeledContent("Скорость курсора Windows") {

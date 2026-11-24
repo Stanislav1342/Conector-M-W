@@ -24,10 +24,17 @@ type inputFrame struct {
 }
 
 type streamMessage struct {
-	Type    string `json:"type"`
-	Capture uint64 `json:"capture,omitempty"`
-	Text    string `json:"text,omitempty"`
-	Image   string `json:"image,omitempty"`
+	Type    string        `json:"type"`
+	Capture uint64        `json:"capture,omitempty"`
+	Text    string        `json:"text,omitempty"`
+	Image   string        `json:"image,omitempty"`
+	Files   []offeredFile `json:"files,omitempty"`
+}
+
+type clipApplyJob struct {
+	kind  string
+	text  string
+	image string
 }
 
 func validEvents(events []event) bool {
@@ -49,10 +56,20 @@ func (r *receiver) releaseAll() {
 }
 
 func inputStream(r *receiver, control *sync.Mutex, token string) http.HandlerFunc {
-	return inputStreamContext(context.Background(), r, control, token)
+	return inputStreamWithBridge(context.Background(), r, control, token, nil, nil)
 }
 
 func inputStreamContext(ctx context.Context, r *receiver, control *sync.Mutex, token string) http.HandlerFunc {
+	return inputStreamWithBridge(ctx, r, control, token, nil, nil)
+}
+
+func inputStreamWithBridge(ctx context.Context, r *receiver, control *sync.Mutex, token string, clip *clipboardBridge, files *fileStore) http.HandlerFunc {
+	if clip == nil {
+		clip = newClipboardBridge()
+	}
+	if files == nil {
+		files = newFileStore()
+	}
 	upgrader := websocket.Upgrader{HandshakeTimeout: 3 * time.Second}
 	return func(w http.ResponseWriter, req *http.Request) {
 		if !authorized(req, token) {
@@ -79,7 +96,7 @@ func inputStreamContext(ctx context.Context, r *receiver, control *sync.Mutex, t
 		write := func(message streamMessage) error {
 			writeMu.Lock()
 			defer writeMu.Unlock()
-			deadline := time.Second
+			deadline := 2 * time.Second
 			if message.Type == "clipboardImage" {
 				deadline = 5 * time.Second
 			}
@@ -89,8 +106,15 @@ func inputStreamContext(ctx context.Context, r *receiver, control *sync.Mutex, t
 		if write(streamMessage{Type: "ready"}) != nil {
 			return
 		}
-		clip := newClipboardBridge()
 		var keepAwake atomic.Bool
+		pushClipCh := make(chan struct{}, 1)
+		applyClipCh := make(chan clipApplyJob, 8)
+		enqueuePushClipboard := func() {
+			select {
+			case pushClipCh <- struct{}{}:
+			default:
+			}
+		}
 		pushClipboard := func() {
 			if item, ok := clip.pollLocal(); ok {
 				switch item.kind {
@@ -101,6 +125,11 @@ func inputStreamContext(ctx context.Context, r *receiver, control *sync.Mutex, t
 						Type:  "clipboardImage",
 						Image: base64.StdEncoding.EncodeToString(item.image),
 					})
+				case "files":
+					offered := files.register(item.files)
+					if len(offered) > 0 {
+						_ = write(streamMessage{Type: "fileOffer", Files: offered})
+					}
 				}
 			}
 		}
@@ -113,6 +142,8 @@ func inputStreamContext(ctx context.Context, r *receiver, control *sync.Mutex, t
 				select {
 				case <-streamCtx.Done():
 					return
+				case <-pushClipCh:
+					pushClipboard()
 				case <-clipTicker.C:
 					pushClipboard()
 				case <-awakeTicker.C:
@@ -122,11 +153,33 @@ func inputStreamContext(ctx context.Context, r *receiver, control *sync.Mutex, t
 				}
 			}
 		}()
+		go func() {
+			for {
+				select {
+				case <-streamCtx.Done():
+					return
+				case job := <-applyClipCh:
+					switch job.kind {
+					case "text":
+						if err := clip.applyRemote(job.text); err != nil {
+							log.Printf("clipboard apply: %v", err)
+						}
+					case "image":
+						pngBytes, err := base64.StdEncoding.DecodeString(job.image)
+						if err == nil && len(pngBytes) > 0 && len(pngBytes) <= maxClipboardImageBytes {
+							if err := clip.applyRemoteImage(pngBytes); err != nil {
+								log.Printf("clipboard image apply: %v", err)
+							}
+						}
+					}
+				}
+			}
+		}()
 		var capture uint64
 		for {
-			readTimeout := 12 * time.Second
+			readTimeout := 15 * time.Second
 			if capture != 0 {
-				readTimeout = 2 * time.Second
+				readTimeout = 6 * time.Second
 			}
 			_ = ws.SetReadDeadline(time.Now().Add(readTimeout))
 			kind, data, err := ws.ReadMessage()
@@ -142,18 +195,17 @@ func inputStreamContext(ctx context.Context, r *receiver, control *sync.Mutex, t
 			switch frame.Type {
 			case "clipboard":
 				if len(frame.Clipboard) <= maxClipboardBytes {
-					if err := clip.applyRemote(frame.Clipboard); err != nil {
-						log.Printf("clipboard apply: %v", err)
+					select {
+					case applyClipCh <- clipApplyJob{kind: "text", text: frame.Clipboard}:
+					default:
 					}
 				}
 				continue
 			case "clipboardImage":
 				if len(frame.Image) > 0 && len(frame.Image) <= base64.StdEncoding.EncodedLen(maxClipboardImageBytes) {
-					pngBytes, err := base64.StdEncoding.DecodeString(frame.Image)
-					if err == nil && len(pngBytes) > 0 && len(pngBytes) <= maxClipboardImageBytes {
-						if err := clip.applyRemoteImage(pngBytes); err != nil {
-							log.Printf("clipboard image apply: %v", err)
-						}
+					select {
+					case applyClipCh <- clipApplyJob{kind: "image", image: frame.Image}:
+					default:
 					}
 				}
 				continue
@@ -170,6 +222,9 @@ func inputStreamContext(ctx context.Context, r *receiver, control *sync.Mutex, t
 					r.mu.Lock()
 					if !r.stopped {
 						r.last = time.Now()
+						if frame.Action == "snip" {
+							r.release()
+						}
 						if err := sendShortcut(frame.Action); err != nil {
 							log.Printf("stream shortcut %s: %v", frame.Action, err)
 						}
@@ -204,7 +259,7 @@ func inputStreamContext(ctx context.Context, r *receiver, control *sync.Mutex, t
 				return
 			}
 			if returned || first == "release" {
-				pushClipboard()
+				enqueuePushClipboard()
 				if returned && write(streamMessage{Type: "returned", Capture: capture}) != nil {
 					return
 				}

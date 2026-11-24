@@ -272,6 +272,71 @@ test("Cmd + Shift + Space, Ctrl + Space, and disabled setting pass through norma
     expectEqual(disabled.events(for: 49, down: true, flagsChanged: false), [key(0x39, true)])
 }
 
+test("pinch zoom detector filters jitter, emits zoomIn/zoomOut, and resets cleanly") {
+    var pinch = PinchZoomDetector()
+    expect(pinch.update(magnification: 0.05, ended: false, now: 1.0) == nil)
+    expect(pinch.update(magnification: 0.06, ended: false, now: 1.02) == nil)
+    expectEqual(pinch.update(magnification: 0.05, ended: false, now: 1.04), "zoomIn")
+    // Cooldown prevents flooding while pinching rapidly.
+    expect(pinch.update(magnification: 0.20, ended: false, now: 1.07) == nil)
+    expectEqual(pinch.update(magnification: -0.30, ended: false, now: 1.20), "zoomOut")
+    // Ending resets accumulated delta.
+    expect(pinch.update(magnification: 0.10, ended: false, now: 1.35) == nil)
+    expect(pinch.update(magnification: 0.0, ended: true, now: 1.36) == nil)
+    expect(pinch.update(magnification: 0.08, ended: false, now: 1.40) == nil)
+}
+
+test("Cmd + arrows and Shift + Cmd + arrows map to Home/End and restore Ctrl on Cmd+C") {
+    var keyboard = RemoteKeyboard(commandIsControl: true, commandSpaceSwitchesLanguage: true, macShortcuts: true)
+    expectEqual(keyboard.events(for: 55, down: true, flagsChanged: true), [key(0x1d, true)])
+    expectEqual(keyboard.events(for: 123, down: true, flagsChanged: false), [key(0x1d, false), key(0x147, true)])
+    expectEqual(keyboard.events(for: 123, down: false, flagsChanged: false), [key(0x147, false)])
+    expectEqual(keyboard.events(for: 8, down: true, flagsChanged: false), [key(0x1d, true), key(0x2e, true)])
+    expectEqual(keyboard.events(for: 8, down: false, flagsChanged: false), [key(0x2e, false)])
+    expectEqual(keyboard.events(for: 55, down: false, flagsChanged: true), [key(0x1d, false)])
+
+    // Shift selection + Cmd + Right arrow -> End while preserving Shift.
+    expectEqual(keyboard.events(for: 55, down: true, flagsChanged: true), [key(0x1d, true)])
+    expectEqual(keyboard.events(for: 56, down: true, flagsChanged: true), [key(0x2a, true)])
+    expectEqual(keyboard.events(for: 124, down: true, flagsChanged: false), [key(0x1d, false), key(0x14f, true)])
+    // Release Cmd before releasing Right arrow still releases End cleanly.
+    expectEqual(keyboard.events(for: 55, down: false, flagsChanged: true), [])
+    expectEqual(keyboard.events(for: 124, down: false, flagsChanged: false), [key(0x14f, false)])
+    expectEqual(keyboard.events(for: 56, down: false, flagsChanged: true), [key(0x2a, false)])
+}
+
+test("Cmd + Backspace deletes to line start and Option + arrows/Backspace move/delete by word") {
+    var keyboard = RemoteKeyboard(commandIsControl: true, commandSpaceSwitchesLanguage: true, macShortcuts: true)
+    expectEqual(keyboard.events(for: 55, down: true, flagsChanged: true), [key(0x1d, true)])
+    expectEqual(keyboard.events(for: 51, down: true, flagsChanged: false),
+                [key(0x1d, false), key(0x2a, true), key(0x147, true), key(0x147, false), key(0x2a, false), key(0x0e, true), key(0x0e, false)])
+    expectEqual(keyboard.events(for: 51, down: false, flagsChanged: false), [])
+    expectEqual(keyboard.events(for: 55, down: false, flagsChanged: true), [])
+
+    // Option + Left/Backspace: presses LCtrl before releasing Alt so menu bar never opens.
+    expectEqual(keyboard.events(for: 58, down: true, flagsChanged: true), [key(0x38, true)])
+    expectEqual(keyboard.events(for: 123, down: true, flagsChanged: false),
+                [key(0x1d, true), key(0x38, false), key(0x14b, true)])
+    expectEqual(keyboard.events(for: 123, down: false, flagsChanged: false), [key(0x14b, false)])
+    expectEqual(keyboard.events(for: 51, down: true, flagsChanged: false), [key(0x0e, true)])
+    expectEqual(keyboard.events(for: 51, down: false, flagsChanged: false), [key(0x0e, false)])
+    expectEqual(keyboard.events(for: 58, down: false, flagsChanged: true), [key(0x1d, false)])
+
+    // Disabled macShortcuts passes keys through normally.
+    var disabled = RemoteKeyboard(commandIsControl: true, commandSpaceSwitchesLanguage: true, macShortcuts: false)
+    expectEqual(disabled.events(for: 55, down: true, flagsChanged: true), [key(0x1d, true)])
+    expectEqual(disabled.events(for: 123, down: true, flagsChanged: false), [key(0x14b, true)])
+}
+
+test("releaseAllModifiers releases held Ctrl + Shift and swallows physical releases") {
+    var keyboard = RemoteKeyboard(commandIsControl: true, commandSpaceSwitchesLanguage: true, macShortcuts: true)
+    expectEqual(keyboard.events(for: 55, down: true, flagsChanged: true), [key(0x1d, true)])
+    expectEqual(keyboard.events(for: 56, down: true, flagsChanged: true), [key(0x2a, true)])
+    expectEqual(keyboard.releaseAllModifiers(), [key(0x1d, false), key(0x2a, false)])
+    expectEqual(keyboard.events(for: 56, down: false, flagsChanged: true), [])
+    expectEqual(keyboard.events(for: 55, down: false, flagsChanged: true), [])
+}
+
 test("every scan code is accepted by the receiver") {
     // Mirrors event.valid() in windows/main.go.
     for (mac, code) in scanCodes {
